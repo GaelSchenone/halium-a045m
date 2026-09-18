@@ -70,16 +70,55 @@ y binutils `toolchain/toolchains-gcc-10.3.0`). El `Makefile` del kernel usa
 `aarch64-linux-gnu-gcc` del sistema en vez de este toolchain rompe el build
 con errores de sintaxis rarísimos. **Siempre usar el toolchain vendorizado.**
 
-### Fase 1 — Kernel propio, boot sanity check ✅ (compilación) / ⏳ (boot real)
+### Fase 1 — Kernel propio, boot sanity check ✅ COMPLETA
 - [x] Compilar `kernel/` tal cual, sin modificar nada — **logrado**, con el
       harness oficial (`build/build.sh`). Generó `Image`, `Image.gz` y el DTB
       exacto `mt6765_a04_eur_open_00.dtb` en
       `out/kernel-4.19/arch/arm64/boot/`.
-- [ ] Empaquetar boot.img con el ramdisk **stock** (extraído del firmware
-      original) + el kernel recién compilado.
-- [ ] Flashear por Odin/heimdall y confirmar que bootea Android normal.
-      Esto valida el toolchain y la firma/formato de imagen antes de tocar
-      nada del lado de Linux.
+- [x] Empaquetar boot.img con el ramdisk **stock** (extraído del firmware
+      original) + el kernel recién compilado. Header Android bootimg v2,
+      formato preservado byte a byte salvo el kernel. Script en
+      `PORTING.md` (ver "Cómo se armó el boot.img" abajo).
+- [x] Flashear por Heimdall y confirmar boot real en el equipo físico
+      (SM-A045M, build A045MUBSGEZE1). **Confirmado**: `adb shell uname -r`
+      devuelve `4.19.191-geb4dea5ce8e1-dirty` (nuestro build, no el de
+      Samsung) con el equipo andando normalmente.
+
+**Firmware stock de respaldo:** descargado con
+[topjohnwu/samloader-rs](https://github.com/topjohnwu/samloader-rs) (el
+`samloader` en Python de nlscc está roto — las claves AES hardcodeadas para
+desencriptar el nonce de FUS quedaron desactualizadas). Versión exacta:
+`A045MUBSGEZE1/A045MOWOGEZE1/A045MUBSGEZE1/A045MUBSGEZE1`, CSC `ARO`
+(Argentina). Guardado en `firmware/` (gitignored, pesa ~6GB).
+
+**Cómo se armó el boot.img:**
+1. `lz4 -d boot.img.lz4 boot.img` sobre el `boot.img.lz4` del `AP_*.tar.md5`
+   del firmware stock.
+2. Parsear el header Android bootimg (v2: magic + 10 campos uint32 + name +
+   cmdline + id + extra_cmdline + recovery_dtbo\_\* + dtb_size/dtb_addr,
+   1660 bytes reales dentro de una página de 2048) para extraer kernel,
+   ramdisk y el bloque de DTB final (identificado por el magic
+   `0xd7b7ab1e`, formato `DT_TABLE` — no es un `.dtb` suelto).
+3. Repacker: mismo header con `kernel_size` actualizado al tamaño de
+   nuestro `Image.gz`, mismo ramdisk y bloque DTB copiados sin tocar, mismo
+   tamaño total de archivo (32MB, el tamaño de la partición `boot`).
+4. `heimdall flash --boot boot_custom.img` (la partición se llama `boot`
+   en minúscula, confirmado con `heimdall print-pit`).
+
+**Hallazgo importante — brecha en el release GPL de Samsung:** el primer
+intento de boot cayó en recovery ("no se pudo cargar Android, los datos
+pueden estar corruptos"). Comparando `/proc/config.gz` del kernel stock
+corriendo contra nuestro `.config`, la diferencia relevante fue
+`CONFIG_F2FS_SEC_ENC_STRICT_MODE=y` en el stock — **un símbolo de Kconfig
+que no existe en ningún lado del código fuente publicado**. Es decir,
+Samsung no publicó el 100% de los parches de seguridad del kernel real
+(pasa seguido con DEFEX/Knox/cifrado). Nuestro kernel no podía montar el
+`/data` ya cifrado bajo esa política estricta. Con un factory reset,
+`/data` se recreó desde cero bajo nuestro kernel y bootea sin problema.
+**Implicancia a futuro:** cualquier `/data` cifrado con el kernel stock va
+a ser ilegible para builds nuestras; hay que wipear al cambiar de kernel.
+Para Halium esto probablemente no importa, ya que la idea es no depender
+del `/data` cifrado de Android de todos modos.
 
 **Cómo se compiló (para repetirlo):**
 ```sh

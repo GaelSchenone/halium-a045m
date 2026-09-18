@@ -8,11 +8,14 @@ rewriting drivers from scratch.
 
 ## Status
 
-Phase 1 of the roadmap is complete: the vendor kernel builds cleanly with the
-original Android kernel build harness, producing a boot-ready `Image`,
-`Image.gz`, and the device-specific DTB (`mt6765_a04_eur_open_00.dtb`). See
-[PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
-detailed log of every build issue found and fixed so far.
+Phase 1 is complete and verified on real hardware: the vendor kernel builds
+cleanly with the original Android kernel build harness, boots on the device
+(confirmed via `adb shell uname -r` reporting our own build, not Samsung's),
+and required a full data wipe due to a gap in Samsung's published GPL source
+(see [PORTING.md](PORTING.md) for details — `CONFIG_F2FS_SEC_ENC_STRICT_MODE`
+is enabled in the shipped kernel but its implementation was never published).
+See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
+detailed log of every issue found and fixed so far.
 
 ## Why Halium instead of a from-scratch mainline port
 
@@ -83,8 +86,8 @@ damage. Use `git clean -fdx` inside `kernel/` instead, or the `O=`-scoped
 ## Roadmap
 
 1. **Kernel build** — done.
-2. Boot sanity check: repack a boot.img with the stock ramdisk and this
-   kernel, flash it, confirm stock Android still boots.
+2. **Boot sanity check** — done. Custom kernel + stock ramdisk boots on
+   real hardware (required a data wipe, see PORTING.md).
 3. Swap in the Halium ramdisk (`halium-boot`), keeping vendor services
    (vold, hwcomposer) alive.
 4. Wire up `libhybris` and the HALs: display, input, audio, sensors.
