@@ -154,11 +154,71 @@ kernel o del entorno de build):**
    porque son archivos trackeados. **Nunca correr `make clean`/`mrproper`
    in-tree acá; usar `git clean -fdx` o el `mrproper` con `O=` del harness.**
 
-### Fase 2 — Halium ramdisk (hybris-boot)
-- [ ] Reemplazar el ramdisk por el de `halium-boot`, manteniendo vivos los
-      servicios de vendor (vold, hwcomposer, etc.) que dependen las HALs.
+### Fase 2 — Halium ramdisk (hybris-boot) ✅ (system.img genérico) / ⏳ (boot real)
+- [x] Sincronizar el árbol completo de Halium (manifest `halium-12.0`, ~1159
+      proyectos, ~88GB) con `repo`, en `./halium`.
+- [x] Compilar el producto genérico de referencia `lineage_halium_arm64` con
+      el sistema de build oficial de Android (Soong/Make) — **`system.img`
+      generado con éxito** (571MB) en
+      `/run/media/gael-schenone/Datos/halium-build/out/target/product/halium_arm64/`.
+      `TARGET_NO_KERNEL := true` en este producto: no compila kernel, usa el
+      que ya armamos en la Fase 1.
+- [ ] Generar el ramdisk `hybris-boot` real y combinarlo con nuestro kernel +
+      DTB para bootear en el equipo (reemplaza el ramdisk stock que usamos en
+      la Fase 1).
 - [ ] Resolver particularidades de partición de Samsung (AVB/vbmeta,
       `up_param`, posibles chequeos de Knox) que rompan el boot.
+
+**Entorno de build — limitaciones reales de esta máquina (14GB RAM):**
+- `soong_build` (la fase de análisis de dependencias, un solo proceso) llegó
+  a usar **11.6GB de RAM por sí solo**. Con solo 4GB de swap, esto disparó
+  el OOM killer del kernel **y** `systemd-oomd`, que mató la sesión de
+  escritorio completa (no solo el build). Se resolvió agregando un swapfile
+  extra de 24GB (`/swapfile_build`). Bajar `-j` no ayuda con esto porque es
+  una fase de un solo proceso, no de paralelismo.
+- El build también se quedó sin espacio en disco a mitad de camino (out/
+  llegó a 40GB+ en un disco con poco margen libre). Se resolvió moviendo
+  `out/` a un disco externo con más espacio
+  (`/run/media/gael-schenone/Datos/halium-build/out`, symlinkeado de vuelta).
+- **Nunca compartas tu contraseña de sudo con el asistente** — ante cualquier
+  necesidad de sudo, usar el prefijo `!` para correr el comando vos mismo.
+
+**Bugs reales encontrados y arreglados durante el sync/build (parches
+guardados en `halium-patches/`, ver ahí cómo reaplicarlos tras un `repo
+sync` limpio):**
+1. **Manifest de Halium trae proyectos irrelevantes** que rompen el build si
+   se excluyen "a ojo" sin entender las dependencias cruzadas de Soong
+   (`packages/modules/Virtualization/microdroid` referencia kernels de
+   dispositivo virtual y partes de Cuttlefish sin importar el dispositivo
+   real). Terminamos syncando el manifest completo en vez de recortarlo —
+   más pesado, pero confiable.
+2. **`vendor/halium/libhybris` está pineado en `halium-11.0`** en el
+   manifest, mientras el resto del árbol usa `halium-12.0` — no existe una
+   rama `halium-12.0` para libhybris (Halium saltó de 11 a 13). Esto causa
+   varios choques de API entre el código de compat (escrito contra
+   frameworks/av de Android 11) y los headers/símbolos reales de Android 12:
+   - `camera_service`: incluye un header movido
+     (`media/camera_record_service.h`) → **deshabilitado completo** (no es
+     necesario para bootear).
+   - `libmedia_compat_layer`: dos headers movidos (`mediadrm/ICrypto.h`,
+     `media/MediaMetrics.h`) se arreglaron agregando los `-I` correctos, pero
+     después apareció una incompatibilidad de ABI de C++ real
+     (`android::MediaCodecInfo` cambió de firma entre Android 11 y 12) →
+     **deshabilitado completo** junto con sus dependientes
+     (`direct_media_test`, `direct_camera_test`). Es la capa de códecs/
+     grabación de video, no hace falta para bootear ni para el bridge básico
+     de HALs.
+   - `libcamera_compat_layer` (la librería de cámara en sí, distinta del
+     `camera_service` de arriba) **no** depende de lo anterior y compiló
+     bien tal cual.
+3. **Prebuilt clang viejo (`clang-3289846`, usado para RenderScript, ya
+   deprecado en Android) necesita `libncurses.so.5`/`libtinfo.so.5`**, que
+   Ubuntu 26.04 ya no empaqueta. Se instalaron manualmente los `.deb` viejos
+   de `security.ubuntu.com` a nivel sistema (necesario porque un binario
+   compilado en el momento, `bcc_strip_attr`, también los necesitaba, y
+   Soong ejecuta reglas con entorno limpio (`env -i`), así que
+   `LD_LIBRARY_PATH` no alcanza — hace falta o instalar a nivel sistema o
+   poner las libs en el `$ORIGIN/../lib64` del binario prebuilt específico).
 
 ### Fase 3 — libhybris + HALs
 - [ ] Conectar hwcomposer2 para salida de pantalla.

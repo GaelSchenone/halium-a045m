@@ -1,0 +1,71 @@
+diff --git a/compat/camera/Android.mk b/compat/camera/Android.mk
+index 15fd848..32917d6 100644
+--- a/compat/camera/Android.mk
++++ b/compat/camera/Android.mk
+@@ -54,6 +54,9 @@ endif
+ 
+ include $(BUILD_SHARED_LIBRARY)
+ 
++# direct_camera_test deshabilitado: depende de libmedia_compat_layer, que
++# esta deshabilitado en vendor/halium/libhybris/compat/media/Android.mk.
++ifeq (0,1)
+ include $(CLEAR_VARS)
+ 
+ HYBRIS_PATH := $(LOCAL_PATH)/../../hybris
+@@ -96,3 +99,4 @@ LOCAL_MULTILIB := 32
+ endif
+ 
+ include $(BUILD_EXECUTABLE)
++endif # direct_camera_test disabled
+diff --git a/compat/media/Android.mk b/compat/media/Android.mk
+index 613b2ea..3f6becb 100644
+--- a/compat/media/Android.mk
++++ b/compat/media/Android.mk
+@@ -16,6 +16,12 @@ ifeq ($(HYBRIS_MEDIA_32_BIT_ONLY),true)
+ HYBRIS_MEDIA_MULTILIB := 32
+ endif
+ 
++# camera_service deshabilitado: escrito contra el layout de frameworks/av de
++# Android 11 (revision de libhybris pineada en halium-11.0 aunque el resto
++# del arbol es halium-12.0); camera_service.cpp incluye
++# media/camera_record_service.h, que no existe en frameworks/av de Android 12.
++# No es un modulo requerido para bootear ni para el bridge de HALs.
++ifeq (0,1)
+ include $(CLEAR_VARS)
+ include $(LOCAL_PATH)/../Android.common.mk
+ 
+@@ -88,6 +94,7 @@ LOCAL_MULTILIB := 32
+ endif
+ 
+ include $(BUILD_EXECUTABLE)
++endif # camera_service disabled
+ 
+ # -------------------------------------------------
+ 
+@@ -102,6 +109,12 @@ endif
+ 
+ # -------------------------------------------------
+ 
++# libmedia_compat_layer y direct_media_test deshabilitados: mismo desfasaje
++# de version libhybris halium-11.0 vs frameworks/av de Android 12. Acá el
++# problema ya no son includes sino simbolos C++ (MediaCodecInfo cambio de
++# ABI entre 11 y 12); no vale la pena parchear caso por caso. No hace falta
++# para bootear ni para el bridge de HALs (es la capa de codecs/grabacion).
++ifeq (0,1)
+ include $(CLEAR_VARS)
+ include $(LOCAL_PATH)/../Android.common.mk
+ 
+@@ -193,6 +206,8 @@ LOCAL_C_INCLUDES := \
+ 	frameworks/base/include/media \
+ 	frameworks/av/media \
+ 	frameworks/av/media/libstagefright/include \
++	frameworks/av/drm/libmediadrm/interface \
++	frameworks/av/media/libmediametrics/include \
+ 	frameworks/av/include \
+ 	frameworks/native/include \
+ 	frameworks/native/include/media/hardware \
+@@ -268,3 +283,4 @@ LOCAL_MULTILIB := 32
+ endif
+ 
+ include $(BUILD_EXECUTABLE)
++endif # libmedia_compat_layer / direct_media_test disabled

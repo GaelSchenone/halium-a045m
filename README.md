@@ -14,6 +14,16 @@ cleanly with the original Android kernel build harness, boots on the device
 and required a full data wipe due to a gap in Samsung's published GPL source
 (see [PORTING.md](PORTING.md) for details — `CONFIG_F2FS_SEC_ENC_STRICT_MODE`
 is enabled in the shipped kernel but its implementation was never published).
+
+Phase 2 has a first major milestone: the generic Halium reference product
+(`lineage_halium_arm64`, VNDK 31 / Android 12, matching this device's vendor
+partition) builds successfully end to end with the real Android build system,
+producing a 571MB `system.img`. Getting there required syncing Halium's full
+~1159-project source tree and fixing several real bugs — a Halium/libhybris
+branch mismatch (pinned to `halium-11.0` while everything else tracks
+`halium-12.0`), a legacy host-toolchain dependency, and host RAM/disk limits
+on the build machine. See [PORTING.md](PORTING.md) for the full log.
+
 See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
 detailed log of every issue found and fixed so far.
 
@@ -59,6 +69,14 @@ kernel/toolchain "prebuilts/" directory build.config.mtk.aarch64 expects
                  for the clang toolchain — already vendored inside the
                  kernel source, no separate download needed.
 out/             Build output (gitignored).
+halium/          Halium's full repo-synced source tree (gitignored, ~88GB —
+                 not something to version; reproducible from
+                 vendor/halium/manifest, branch halium-12.0).
+halium-patches/  Patches applied inside halium/ that aren't upstream yet
+                 (branch mismatches, compat fixes), with instructions to
+                 reapply them after a clean repo sync.
+firmware/        Stock firmware backup + extracted boot.img pieces
+                 (gitignored, several GB).
 PORTING.md       Full roadmap, phase-by-phase status, and build log.
 ```
 
@@ -88,8 +106,9 @@ damage. Use `git clean -fdx` inside `kernel/` instead, or the `O=`-scoped
 1. **Kernel build** — done.
 2. **Boot sanity check** — done. Custom kernel + stock ramdisk boots on
    real hardware (required a data wipe, see PORTING.md).
-3. Swap in the Halium ramdisk (`halium-boot`), keeping vendor services
-   (vold, hwcomposer) alive.
+3. **Halium system.img** — done. The generic `lineage_halium_arm64` product
+   builds successfully (571MB system.img). Still need to build the
+   `hybris-boot` ramdisk and get it actually booting on the device.
 4. Wire up `libhybris` and the HALs: display, input, audio, sensors.
 5. Bring up a Halium-generic rootfs (postmarketOS or Ubuntu Touch base).
 6. Iterative hardware bring-up: display, touch, Wi-Fi, audio, modem/RIL,
