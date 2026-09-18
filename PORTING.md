@@ -32,27 +32,88 @@ postmarketOS.
 - **Mismo SoC con Halium funcionando** (referencia de arquitectura, no de tu
   dispositivo puntual): [ubports-xiaomi-cereus](https://github.com/ubports-xiaomi-cereus)
   (Redmi 6/6A, también MT6765).
-- No hay ningún port de postmarketOS/mainline para el A04/M04 (MT6765).
-  Este va a ser trabajo nuevo para el modelo puntual.
+- **Mainline real para el MT6765** (actualizado, corrige lo que decíamos antes):
+  [evilMyQueen/linux-mt6765](https://github.com/evilMyQueen/linux-mt6765), rama
+  `mt6765-devel`, basado en Linux 7.1 mainline, con patches reales de
+  evilMyQueen y Arseniy Velikanov (adomerle) agregando SMP, GPIO, SCP,
+  Watchdog, PWRAP, ADC, UART, PWM, I2C, SPI, USB, MMC y DSI (pantalla) para el
+  MT6765. Tienen device trees para Nokia 3.1 Plus y soporte parcial de Redmi
+  9A, pero **ningún device tree para el A04/A045M todavía**. Comunidad activa
+  en Matrix: `#lenovomt6765:matrix.vistaslayer.ovh`.
+- Confirmado contra pmaports (GitLab) que **no existe** `device-samsung-a04`
+  ni en `main`, `community`, `testing` ni `archived` — cualquier cosa que diga
+  la wiki de postmarketOS sobre el A04 "en desarrollo" es informal, no hay un
+  port publicado para instalar.
+- Alternativa a evaluar más adelante: en vez de (o además de) Halium, escribir
+  un device tree nuevo para el A045M sobre `mt6765.dtsi` sería Linux mainline
+  real, sin blobs, aunque sin GPU acelerada ni módem al principio.
 
 ## Roadmap
 
-### Fase 0 — Entorno de build
-- [ ] Instalar toolchain aarch64 (`aarch64-linux-gnu-gcc` o clang, según
-      `kernel/build.config.mtk.aarch64`).
-- [ ] Instalar herramienta `repo` de Halium/AOSP.
+### Fase 0 — Entorno de build ✅
+- [x] Instalar toolchain aarch64 (`gcc-aarch64-linux-gnu` vía apt) — **no se
+      terminó usando**, ver nota abajo.
+- [x] Bajar el harness oficial de build de Android (`build/`, rama
+      `android-msm-redbull-4.19-android12-qpr1` de
+      `android.googlesource.com/kernel/build`, la última que todavía trae
+      `build.sh` — las ramas modernas usan Bazel/Kleaf y no sirven acá).
 - [ ] Bajar firmware stock completo del CSC exacto del equipo (para poder
-      volver atrás con Odin ante cualquier bootloop).
-- [ ] Confirmar espacio en disco: el árbol completo de Halium/AOSP puede pesar
-      100GB+; el kernel solo son ~650MB.
+      volver atrás con Odin ante cualquier bootloop). **Pendiente, hacelo
+      antes de flashear nada.**
+- [x] Espacio en disco: con el kernel (~650MB) y el harness de build (liviano,
+      son scripts) alcanza y sobra.
 
-### Fase 1 — Kernel propio, boot sanity check
-- [ ] Compilar `kernel/` tal cual, sin modificar nada.
+**Nota clave de toolchain:** el kernel de physwizz ya trae vendorizado el
+compilador exacto original (`kernel/toolchain/clang/host/linux-x86/clang-r383902`
+y binutils `toolchain/toolchains-gcc-10.3.0`). El `Makefile` del kernel usa
+`CC = clang` hardcodeado (o el path a ese clang si `$LLVM` está vacío) — usar
+`aarch64-linux-gnu-gcc` del sistema en vez de este toolchain rompe el build
+con errores de sintaxis rarísimos. **Siempre usar el toolchain vendorizado.**
+
+### Fase 1 — Kernel propio, boot sanity check ✅ (compilación) / ⏳ (boot real)
+- [x] Compilar `kernel/` tal cual, sin modificar nada — **logrado**, con el
+      harness oficial (`build/build.sh`). Generó `Image`, `Image.gz` y el DTB
+      exacto `mt6765_a04_eur_open_00.dtb` en
+      `out/kernel-4.19/arch/arm64/boot/`.
 - [ ] Empaquetar boot.img con el ramdisk **stock** (extraído del firmware
       original) + el kernel recién compilado.
 - [ ] Flashear por Odin/heimdall y confirmar que bootea Android normal.
       Esto valida el toolchain y la firma/formato de imagen antes de tocar
       nada del lado de Linux.
+
+**Cómo se compiló (para repetirlo):**
+```sh
+# Estructura de directorios que espera build.sh (symlinks ya creados en el repo):
+#   linux-a04/kernel-4.19 -> kernel
+#   linux-a04/prebuilts   -> kernel/toolchain
+cd linux-a04
+DEFCONFIG=a04_defconfig BUILD_CONFIG=kernel-4.19/build.config.mtk.aarch64 \
+  build/build.sh CC=<ruta al wrapper de clang, ver nota>
+```
+
+**Bugs reales encontrados y arreglados (no son inventados, son del vendor
+kernel o del entorno de build):**
+1. **`init/version.c` no compila** con "expected ';' after top level
+   declarator": `scripts/mkcompile_h` corre `clang -v` para armar el string de
+   versión, y como esta máquina tiene CUDA instalado, clang imprime una línea
+   extra ("Found CUDA installation...") que contiene la palabra "version" y
+   contamina el string generado. Arreglado con un wrapper de clang que filtra
+   esa línea (no se tocó el kernel). Sin este wrapper, **cualquier build en
+   una máquina con CUDA va a fallar igual**.
+2. **`CONFIG_IKHEADERS`** rompía por `/tools/build/cpio: No such file or
+   directory` (el script espera el harness completo de AOSP). Se resuelve
+   solo al usar `build.sh` con la estructura de directorios correcta; no hizo
+   falta desactivarlo en la build final.
+3. **`kernel/trace/Makefile`**: a `mtk_trace.o` y `trace_mmstat.o` les faltaba
+   `CFLAGS_*.o := -I$(src)` — bug real del vendor kernel (Kbuild no propaga
+   `ccflags-y` a subdirectorios). Fix de una línea, commiteado en el
+   submódulo.
+4. **⚠️ Peligro con `make mrproper` in-tree**: como el toolchain vendorizado
+   vive *adentro* de `kernel/`, un `make mrproper` corrido directo en el
+   árbol (sin `O=`) barre `*.a`/`*.o` de **todo** el srctree, incluido el
+   toolchain — se borró y se restauró con `git checkout -- .` sin problema
+   porque son archivos trackeados. **Nunca correr `make clean`/`mrproper`
+   in-tree acá; usar `git clean -fdx` o el `mrproper` con `O=` del harness.**
 
 ### Fase 2 — Halium ramdisk (hybris-boot)
 - [ ] Reemplazar el ramdisk por el de `halium-boot`, manteniendo vivos los
