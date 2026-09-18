@@ -1,0 +1,3 @@
+[submodule "kernel"]
+	path = kernel
+	url = https://github.com/physwizz/a045m-T-s4.git
