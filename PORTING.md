@@ -154,7 +154,7 @@ kernel o del entorno de build):**
    porque son archivos trackeados. **Nunca correr `make clean`/`mrproper`
    in-tree acá; usar `git clean -fdx` o el `mrproper` con `O=` del harness.**
 
-### Fase 2 — Halium ramdisk (hybris-boot) ✅ (system.img genérico) / ⏳ (boot real)
+### Fase 2 — Halium ramdisk (hybris-boot) ✅ artefactos armados / ⏳ boot real sin probar
 - [x] Sincronizar el árbol completo de Halium (manifest `halium-12.0`, ~1159
       proyectos, ~88GB) con `repo`, en `./halium`.
 - [x] Compilar el producto genérico de referencia `lineage_halium_arm64` con
@@ -163,11 +163,14 @@ kernel o del entorno de build):**
       `/run/media/gael-schenone/Datos/halium-build/out/target/product/halium_arm64/`.
       `TARGET_NO_KERNEL := true` en este producto: no compila kernel, usa el
       que ya armamos en la Fase 1.
-- [ ] Generar el ramdisk `hybris-boot` real y combinarlo con nuestro kernel +
-      DTB para bootear en el equipo (reemplaza el ramdisk stock que usamos en
-      la Fase 1).
+- [x] Armar `halium-boot.img` (kernel + initramfs oficial de Halium + DTB del
+      stock) — en `firmware/halium-boot-artifacts/halium-boot.img`.
+- [x] Reempaquetar `super.img` con el `system.img` de Halium en vez del
+      stock, manteniendo vendor/odm/product/system_ext intactos — en
+      `firmware/super_halium_sparse.img`.
+- [ ] **Flashear ambos y confirmar si arranca** (pendiente, próximo paso).
 - [ ] Resolver particularidades de partición de Samsung (AVB/vbmeta,
-      `up_param`, posibles chequeos de Knox) que rompan el boot.
+      `up_param`, posibles chequeos de Knox) que rompan el boot, si aparecen.
 
 **Entorno de build — limitaciones reales de esta máquina (14GB RAM):**
 - `soong_build` (la fase de análisis de dependencias, un solo proceso) llegó
@@ -219,6 +222,50 @@ sync` limpio):**
    Soong ejecuta reglas con entorno limpio (`env -i`), así que
    `LD_LIBRARY_PATH` no alcanza — hace falta o instalar a nivel sistema o
    poner las libs en el `$ORIGIN/../lib64` del binario prebuilt específico).
+
+**Armado de `halium-boot.img` y `super.img`:**
+
+El target oficial `mka halium-boot` ([Halium/halium-boot](https://github.com/Halium/halium-boot),
+agregado al árbol vía `.repo/local_manifests/device.xml`) espera
+`TARGET_NO_KERNEL := false` con un kernel prebuilt integrado al build de
+Android — más trabajo de integración del que vale la pena para lo que
+necesitamos. En su lugar, reusamos el script de armado de boot.img de la
+Fase 1 para combinar a mano:
+- Nuestro kernel (recompilado — se había borrado su `out/` para liberar
+  espacio antes del sync de Halium).
+- El initramfs oficial de Halium
+  ([initramfs-tools-halium releases](https://github.com/halium/initramfs-tools-halium/releases/tag/continuous),
+  arm64).
+- El mismo bloque de DTB (`DT_TABLE`) que extrajimos del `boot.img` stock en
+  la Fase 1 (no cambia, es el mismo hardware).
+
+**`/system` es una partición lógica (dynamic partitions), no física** —
+`heimdall print-pit` solo muestra `super` como partición real. Hubo que:
+1. Compilar `lpmake`/`lpunpack`/`lpdump` desde
+   [LonelyFool/lpunpack_and_lpmake](https://github.com/LonelyFool/lpunpack_and_lpmake)
+   (standalone, sin depender del árbol completo de AOSP) — necesitó un fix
+   de una línea (`#include <algorithm>` faltante en `liblp/utility.cpp`,
+   mismo tipo de problema que shockea código viejo contra libstdc++
+   moderno).
+2. Extraer `super.img.lz4` del firmware stock (**sí** está en el AP tar,
+   ~4.2GB — hay que buscar el listado completo del tar, no asumir por un
+   grep parcial).
+3. `simg2img` (paquete `android-sdk-libsparse-utils`) para pasar de sparse a
+   raw, `lpunpack` para separar `system`/`vendor`/`odm`/`product`/
+   `system_ext`.
+4. `lpmake` para reconstruir el `super.img` reemplazando solo `system` por
+   el `system.img` de Halium (571MB, mucho más chico que el original de
+   ~4GB — entra sin problema), manteniendo vendor/odm/product/system_ext
+   **intactos** del stock.
+5. `img2simg` para volver a sparse antes de flashear (el original venía en
+   ese formato).
+
+**Riesgo a tener en cuenta:** a diferencia de la Fase 1 (donde el
+`boot.img` original quedó guardado y listo para reflashear al toque), acá
+se borraron los intermedios del `super.img` original para hacer lugar en
+disco. Si hace falta revertir, hay que re-extraer `super.img.lz4` del
+`.zip` del firmware completo (que sí se conserva) — no es instantáneo,
+pero es reproducible.
 
 ### Fase 3 — libhybris + HALs
 - [ ] Conectar hwcomposer2 para salida de pantalla.

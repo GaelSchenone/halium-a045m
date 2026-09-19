@@ -107,11 +107,17 @@ damage. Use `git clean -fdx` inside `kernel/` instead, or the `O=`-scoped
 2. **Boot sanity check** — done. Custom kernel + stock ramdisk boots on
    real hardware (required a data wipe, see PORTING.md).
 3. **Halium system.img** — done. The generic `lineage_halium_arm64` product
-   builds successfully (571MB system.img). Still need to build the
-   `hybris-boot` ramdisk and get it actually booting on the device.
-4. Wire up `libhybris` and the HALs: display, input, audio, sensors.
-5. Bring up a Halium-generic rootfs (postmarketOS or Ubuntu Touch base).
-6. Iterative hardware bring-up: display, touch, Wi-Fi, audio, modem/RIL,
+   builds successfully (571MB system.img).
+4. **`halium-boot.img` + repacked `super.img`** — done, not yet flashed.
+   `/system` turned out to be a dynamic-partitions logical volume inside
+   `super`, not a physical partition — required compiling `lpmake`/
+   `lpunpack` and repacking `super.img` with Halium's system.img swapped in.
+   See PORTING.md for the full process.
+5. Flash both and see if Halium's HAL-bridge layer actually boots on this
+   hardware — next step.
+6. Wire up `libhybris` and the HALs: display, input, audio, sensors.
+7. Bring up a Halium-generic rootfs (postmarketOS or Ubuntu Touch base).
+8. Iterative hardware bring-up: display, touch, Wi-Fi, audio, modem/RIL,
    sensors — in that order, from least to most likely to fail.
 
 Full detail, including known risks and every fix applied so far, is in

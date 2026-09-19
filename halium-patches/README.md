@@ -19,3 +19,21 @@ Para reaplicar tras un sync limpio:
 cd halium/vendor/halium/libhybris
 git apply /ruta/a/halium-patches/libhybris-android12-compat-fixes.patch
 ```
+
+## lpunpack_and_lpmake-libstdcxx-fix.patch
+
+Fix de una línea (`#include <algorithm>` faltante en `liblp/utility.cpp`)
+para poder compilar [LonelyFool/lpunpack_and_lpmake](https://github.com/LonelyFool/lpunpack_and_lpmake)
+con un `clang`/libstdc++ moderno (el código original asumía que `<algorithm>`
+se incluía transitivamente, cosa que las versiones nuevas de libstdc++ ya no
+hacen). Necesario para armar `lpmake`/`lpunpack`/`lpdump` — herramientas para
+manipular `super.img` (dynamic partitions), que no vienen empaquetadas en
+Ubuntu ni conviene compilar desde el árbol completo de AOSP solo para esto.
+
+```sh
+git clone https://github.com/LonelyFool/lpunpack_and_lpmake.git
+cd lpunpack_and_lpmake
+git apply /ruta/a/halium-patches/lpunpack_and_lpmake-libstdcxx-fix.patch
+bash make.sh   # requiere clang/clang++ instalados
+# binarios en bin/: lpmake, lpunpack, lpdump, lpflash, lpadd
+```

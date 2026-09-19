@@ -1,0 +1,12 @@
+diff --git a/lib/liblp/utility.cpp b/lib/liblp/utility.cpp
+index d8e171b..b933237 100755
+--- a/lib/liblp/utility.cpp
++++ b/lib/liblp/utility.cpp
+@@ -14,6 +14,7 @@
+  * limitations under the License.
+  */
+ 
++#include <algorithm>
+ #include <fcntl.h>
+ #include <inttypes.h>
+ #include <stdint.h>
