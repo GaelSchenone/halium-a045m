@@ -154,7 +154,7 @@ kernel o del entorno de build):**
    porque son archivos trackeados. **Nunca correr `make clean`/`mrproper`
    in-tree acá; usar `git clean -fdx` o el `mrproper` con `O=` del harness.**
 
-### Fase 2 — Halium ramdisk (hybris-boot) ✅ artefactos armados / ❌ primer intento de boot falló / ⏳ a reintentar
+### Fase 2 — Halium ramdisk (hybris-boot) ✅ se flashea bien / ❌ no completa el arranque todavía
 - [x] Sincronizar el árbol completo de Halium (manifest `halium-12.0`, ~1159
       proyectos, ~88GB) con `repo`, en `./halium`.
 - [x] Compilar el producto genérico de referencia `lineage_halium_arm64` con
@@ -167,10 +167,14 @@ kernel o del entorno de build):**
       stock) — en `firmware/halium-boot-artifacts/halium-boot.img`.
 - [x] Reempaquetar `super.img` con el `system.img` de Halium en vez del
       stock, manteniendo vendor/odm/product/system_ext intactos — en
-      `firmware/super_halium_sparse.img`.
-- [x] **Intentar flashear** — falló el flasheo de `super_halium_sparse.img`
-      (ver detalle abajo). Equipo restaurado a estado de fábrica limpio
-      (boot + super + data stock) mientras se investiga.
+      `firmware/super_halium_raw.img` (RAW, no sparse — ver más abajo por qué).
+- [x] **Flashear ambos con éxito** — el primer intento (sparse) falló
+      reproduciblemente; el segundo (RAW) subió sin errores. Ver detalle
+      abajo.
+- [x] **Arranca hasta la pantalla de warning de bootloader y se cuelga ahí**
+      — no llega a mostrar nada del lado de Halium. Sin puerto serie no se
+      puede diagnosticar más por ahora. Equipo restaurado a estado de
+      fábrica limpio mientras se busca una forma de obtener logs.
 - [ ] Reintentar el flasheo con el `super.img` corregido (ver pistas abajo).
 - [ ] Resolver particularidades de partición de Samsung (AVB/vbmeta,
       `up_param`, posibles chequeos de Knox) que rompan el boot, si aparecen.
@@ -308,6 +312,45 @@ de la Fase 1 (mismo problema de `CONFIG_F2FS_SEC_ENC_STRICT_MODE`, mirado
 desde el otro lado) — resuelto con otro factory reset. El equipo quedó
 100% en estado de fábrica limpio, listo para retomar el intento de Halium
 en otra sesión.
+
+**Segundo intento — confirma el fix del flasheo, pero el ramdisk de Halium
+no completa el arranque:**
+
+Se reempaquetó `super.img` con las mismas piezas pero **en RAW, sin
+convertir a sparse**. Subió al 100% sin ningún error de `libusb`, en el
+primer intento — **confirma que el problema real era el formato sparse
+con demasiados chunks**, no el tamaño del archivo ni la conexión USB. Con
+`super` (RAW) + `halium-boot.img` flasheados juntos:
+
+- El equipo se queda trabado indefinidamente en la pantalla de warning de
+  bootloader desbloqueado ("This phone is not running Samsung's official
+  software..."), sin avanzar, sin exponer ninguna interfaz USB (ni `adb`
+  ni download mode) mientras está en ese estado.
+- No hay forma de distinguir, sin más información, entre "el ramdisk de
+  Halium arrancó pero es headless y no dibuja nada en pantalla" y "el
+  kernel/ramdisk colgó antes de hacer nada" — **sin puerto serie no hay
+  logs**. Esto es exactamente el límite que ya anticipábamos en la sección
+  de riesgos.
+- Recuperado reflasheando `boot` + `super` originales de fábrica (sin
+  necesitar otro factory reset esta vez).
+
+**Para el próximo intento, en orden de lo más simple a lo más laborioso:**
+1. Repetir el patrón "RAW, no sparse" también para el propio
+   `halium-boot.img` si en algún momento se vuelve a generar con un tamaño
+   grande o de forma reempaquetada (por ahora es chico y no tuvo este
+   problema).
+2. Buscar la forma de conseguir logs sin puerto serie físico: revisar si
+   el conector USB-C del equipo soporta salida de video (algunos Samsung
+   con DeX sí) para ver la consola del kernel por HDMI si `earlycon`/
+   `console=` está en el cmdline; o revisar si hay pines de UART accesibles
+   en la placa (mucho más invasivo, implica abrir el equipo).
+3. Probar bootear el `halium-boot.img` de forma **temporal** (sin
+   flashear) si Heimdall soporta algo equivalente a `fastboot boot` —
+   revisar el flag `--resume`/comandos disponibles; esto evitaría el
+   ciclo completo de flashear+recuperar en cada iteración de debug.
+4. Revisar si el ramdisk de `initramfs-tools-halium` tiene algún modo de
+   log persistente a partición (en vez de solo consola) que se pueda leer
+   después reflasheando el kernel stock y montando esa partición vía adb.
 
 ### Fase 3 — libhybris + HALs
 - [ ] Conectar hwcomposer2 para salida de pantalla.

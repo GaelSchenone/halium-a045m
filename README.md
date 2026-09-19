@@ -25,9 +25,13 @@ branch mismatch (pinned to `halium-11.0` while everything else tracks
 on the build machine. See [PORTING.md](PORTING.md) for the full log.
 
 The first flash attempt (`halium-boot.img` + a repacked `super.img`) failed
-reproducibly partway through — the device recovered cleanly to stock. See
-PORTING.md for the diagnosis (likely too many sparse chunks in the repacked
-image) before the next attempt.
+reproducibly partway through with the repacked image as a sparse file
+(confirmed cause: too many sparse chunks — 4760 vs. 168 in the stock
+image). Repacking it as raw instead flashed cleanly on the first try. With
+both flashed, the device boots as far as the "bootloader unlocked" warning
+screen and hangs there — no serial console available yet to see why. The
+device was restored to a clean stock state. See PORTING.md for full details
+and next steps for getting boot logs.
 
 See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
 detailed log of every issue found and fixed so far.
@@ -118,14 +122,16 @@ damage. Use `git clean -fdx` inside `kernel/` instead, or the `O=`-scoped
    `super`, not a physical partition — required compiling `lpmake`/
    `lpunpack` and repacking `super.img` with Halium's system.img swapped in.
    See PORTING.md for the full process.
-5. **First flash attempt** — failed. Flashing the repacked `super.img` via
-   Heimdall failed reproducibly at ~18% (likely too many sparse chunks from
-   repacking — the original has 168, ours had 4760). Device recovered to a
-   clean stock state. See PORTING.md for the diagnosis and what to try next
-   before re-flashing.
-6. Wire up `libhybris` and the HALs: display, input, audio, sensors.
-7. Bring up a Halium-generic rootfs (postmarketOS or Ubuntu Touch base).
-8. Iterative hardware bring-up: display, touch, Wi-Fi, audio, modem/RIL,
+5. **Flashing** — solved. The sparse-format repack failed reproducibly at
+   ~18% (too many sparse chunks — 168 in the original vs. 4760 in ours);
+   repacking as raw instead flashed cleanly.
+6. **First boot attempt** — hangs at the bootloader warning screen, no
+   crash, no recovery prompt, nothing visible past that point. No serial
+   console yet to see why. Device recovered to a clean stock state. See
+   PORTING.md for next steps to get boot logs.
+7. Wire up `libhybris` and the HALs: display, input, audio, sensors.
+8. Bring up a Halium-generic rootfs (postmarketOS or Ubuntu Touch base).
+9. Iterative hardware bring-up: display, touch, Wi-Fi, audio, modem/RIL,
    sensors — in that order, from least to most likely to fail.
 
 Full detail, including known risks and every fix applied so far, is in
