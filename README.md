@@ -24,6 +24,11 @@ branch mismatch (pinned to `halium-11.0` while everything else tracks
 `halium-12.0`), a legacy host-toolchain dependency, and host RAM/disk limits
 on the build machine. See [PORTING.md](PORTING.md) for the full log.
 
+The first flash attempt (`halium-boot.img` + a repacked `super.img`) failed
+reproducibly partway through — the device recovered cleanly to stock. See
+PORTING.md for the diagnosis (likely too many sparse chunks in the repacked
+image) before the next attempt.
+
 See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
 detailed log of every issue found and fixed so far.
 
@@ -108,13 +113,16 @@ damage. Use `git clean -fdx` inside `kernel/` instead, or the `O=`-scoped
    real hardware (required a data wipe, see PORTING.md).
 3. **Halium system.img** — done. The generic `lineage_halium_arm64` product
    builds successfully (571MB system.img).
-4. **`halium-boot.img` + repacked `super.img`** — done, not yet flashed.
+4. **`halium-boot.img` + repacked `super.img`** — built.
    `/system` turned out to be a dynamic-partitions logical volume inside
    `super`, not a physical partition — required compiling `lpmake`/
    `lpunpack` and repacking `super.img` with Halium's system.img swapped in.
    See PORTING.md for the full process.
-5. Flash both and see if Halium's HAL-bridge layer actually boots on this
-   hardware — next step.
+5. **First flash attempt** — failed. Flashing the repacked `super.img` via
+   Heimdall failed reproducibly at ~18% (likely too many sparse chunks from
+   repacking — the original has 168, ours had 4760). Device recovered to a
+   clean stock state. See PORTING.md for the diagnosis and what to try next
+   before re-flashing.
 6. Wire up `libhybris` and the HALs: display, input, audio, sensors.
 7. Bring up a Halium-generic rootfs (postmarketOS or Ubuntu Touch base).
 8. Iterative hardware bring-up: display, touch, Wi-Fi, audio, modem/RIL,

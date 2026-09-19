@@ -154,7 +154,7 @@ kernel o del entorno de build):**
    porque son archivos trackeados. **Nunca correr `make clean`/`mrproper`
    in-tree acá; usar `git clean -fdx` o el `mrproper` con `O=` del harness.**
 
-### Fase 2 — Halium ramdisk (hybris-boot) ✅ artefactos armados / ⏳ boot real sin probar
+### Fase 2 — Halium ramdisk (hybris-boot) ✅ artefactos armados / ❌ primer intento de boot falló / ⏳ a reintentar
 - [x] Sincronizar el árbol completo de Halium (manifest `halium-12.0`, ~1159
       proyectos, ~88GB) con `repo`, en `./halium`.
 - [x] Compilar el producto genérico de referencia `lineage_halium_arm64` con
@@ -168,7 +168,10 @@ kernel o del entorno de build):**
 - [x] Reempaquetar `super.img` con el `system.img` de Halium en vez del
       stock, manteniendo vendor/odm/product/system_ext intactos — en
       `firmware/super_halium_sparse.img`.
-- [ ] **Flashear ambos y confirmar si arranca** (pendiente, próximo paso).
+- [x] **Intentar flashear** — falló el flasheo de `super_halium_sparse.img`
+      (ver detalle abajo). Equipo restaurado a estado de fábrica limpio
+      (boot + super + data stock) mientras se investiga.
+- [ ] Reintentar el flasheo con el `super.img` corregido (ver pistas abajo).
 - [ ] Resolver particularidades de partición de Samsung (AVB/vbmeta,
       `up_param`, posibles chequeos de Knox) que rompan el boot, si aparecen.
 
@@ -266,6 +269,45 @@ se borraron los intermedios del `super.img` original para hacer lugar en
 disco. Si hace falta revertir, hay que re-extraer `super.img.lz4` del
 `.zip` del firmware completo (que sí se conserva) — no es instantáneo,
 pero es reproducible.
+
+**Intento de flasheo fallido y recuperación (primer intento real, sin
+éxito todavía):**
+
+El flasheo de `super_halium_sparse.img` (3GB) con Heimdall falló de forma
+consistente y **reproducible en el mismo punto** (~17-18% de la
+transferencia), con `libusb error -7`, tanto en un solo archivo como
+dividido en 6 chunks de ~500MB con `simg2simg`. El equipo terminó en un
+estado `DOWNLOAD FAILED DETECTED: super` (recuperable, no es un brick) que
+requirió reflashear `super` con éxito para salir.
+
+**Pista clave para la próxima vez:** en la pantalla del equipo, la barra de
+progreso de Odin/Download mode **nunca avanzaba** con nuestro
+`super_halium_sparse.img`, pero sí avanzó con normalidad al reflashear el
+`super.img` **original** de fábrica. Esto sugiere que el problema no era
+solo inestabilidad de USB/Heimdall del lado de la PC, sino algo en cómo
+`lpmake`/`img2simg` armaron nuestro archivo que hacía que el propio
+bootloader del equipo se trabara procesándolo. Diferencia observada: nuestro
+sparse reempaquetado quedó con **4760 chunks internos**, contra **168
+chunks** en el sparse original de Samsung — probablemente porque los datos
+de nuestro `system.img` (contenido totalmente distinto al original)
+comprimen peor en el algoritmo de detección de bloques-cero de
+`img2simg`. Antes de reintentar, vale la pena:
+- Probar flashear el `super_halium.img` en **RAW** (sin convertir a sparse)
+  en vez de sparse, ya que el problema puede estar específicamente en el
+  formato sparse con muchos chunks, no en el tamaño del archivo.
+- Si hay que usar sparse sí o sí, investigar si `lpmake`/`img2simg` tienen
+  alguna opción para forzar chunks más grandes/menos numerosos.
+- Considerar probar con **Odin real en Windows** en vez de Heimdall, ya que
+  es la herramienta oficial y puede manejar mejor este caso.
+
+**Recuperación realizada:** reflasheado `super.img` original de fábrica
+(reconstruido desde el `.zip` del firmware) con éxito, después `boot.img`
+original de fábrica también. Esto dejó el kernel stock corriendo de nuevo
+contra un `/data` que había quedado formateado bajo nuestro kernel custom
+de la Fase 1 (mismo problema de `CONFIG_F2FS_SEC_ENC_STRICT_MODE`, mirado
+desde el otro lado) — resuelto con otro factory reset. El equipo quedó
+100% en estado de fábrica limpio, listo para retomar el intento de Halium
+en otra sesión.
 
 ### Fase 3 — libhybris + HALs
 - [ ] Conectar hwcomposer2 para salida de pantalla.
