@@ -175,7 +175,14 @@ kernel o del entorno de build):**
       — no llega a mostrar nada del lado de Halium. Sin puerto serie no se
       puede diagnosticar más por ahora. Equipo restaurado a estado de
       fábrica limpio mientras se busca una forma de obtener logs.
-- [ ] Reintentar el flasheo con el `super.img` corregido (ver pistas abajo).
+- [x] Reintentar el flasheo con el `super.img` corregido (RAW) — confirmado
+      que sube sin errores.
+- [x] Equipo rooteado (Magisk) para poder leer `/sys/fs/pstore/` y hacer
+      diagnóstico sin puerto serie.
+- [ ] Conseguir un shell/log real del cuelgue de Halium — pstore resultó no
+      viable (ver detalle abajo), debug telnet de `hybris-boot` encontrado
+      pero con un bug de `telnetd` sin resolver todavía. Ver plan para la
+      próxima sesión al final de esta fase.
 - [ ] Resolver particularidades de partición de Samsung (AVB/vbmeta,
       `up_param`, posibles chequeos de Knox) que rompan el boot, si aparecen.
 
@@ -351,6 +358,142 @@ con demasiados chunks**, no el tamaño del archivo ni la conexión USB. Con
 4. Revisar si el ramdisk de `initramfs-tools-halium` tiene algún modo de
    log persistente a partición (en vez de solo consola) que se pueda leer
    después reflasheando el kernel stock y montando esa partición vía adb.
+
+**Tercer intento — rooteo del equipo + pstore/ramoops para diagnosticar el
+cuelgue sin puerto serie:**
+
+Dado que no hay puerto serie físico accesible, se armó una estrategia de
+varios pasos para poder leer algo del kernel de Halium sin abrir el equipo:
+
+1. **Rooteo con Magisk (v30.7)** para poder leer `/sys/fs/pstore/` (requiere
+   root; usuario `shell`/`system` no tiene permisos). Se parcheó
+   `boot_pstore_read2.img` (kernel bueno + ramdisk stock + cmdline con
+   `ramoops.*` explícitos) con `boot_patch.sh` de Magisk **corrido a mano
+   por `adb shell`**, no con la app.
+   - **Primer intento de parcheo (flags por default) causó bootloop**: el
+     patch por default de Magisk modifica el fstab (saca las opciones
+     `avb=...` y `fileencryption=...,keydirectory=...`), lo cual rompe el
+     mount de `/data` en este equipo. Recuperado reflasheando el boot.img
+     bueno conocido.
+   - **Segundo intento con `KEEPFORCEENCRYPT=true KEEPVERITY=true`
+     bootea sin problema** y da root funcional (`su -v` → `30.7:MAGISKSU`).
+     Guardado como `firmware/boot_rooted2.img`, es el boot.img "seguro" de
+     referencia para volver a Android normal desde ahora en adelante.
+2. **Habilitado `CONFIG_VT`/`CONFIG_FRAMEBUFFER_CONSOLE` en el kernel** para
+   intentar ver texto de consola en pantalla — **descartado como camino
+   muerto**: `CONFIG_DRM_MEDIATEK` **no** está habilitado en este kernel, es
+   decir Android en este equipo no usa el framebuffer/DRM estándar del
+   kernel para la pantalla (usa un driver propietario de MediaTek a nivel
+   HAL). Sin un driver DRM real detrás, fbcon no tiene nada que dibujar —
+   pantalla negra sí o sí, sin importar qué tan bien configurado esté fbcon.
+3. **Procedimiento de captura vía pstore**: flashear
+   `halium-boot-ramoops.img` (kernel bueno + ramdisk **original** de Halium,
+   sin modificar + cmdline con
+   `ramoops.mem_address=0x47c90000 ramoops.mem_size=0xe0000
+   ramoops.pmsg_size=0x10000 ramoops.console_size=0x40000 console=tty0` —
+   estos valores salen de `/cache/recovery/last_kernel`, el log del propio
+   bootloader/LK de Samsung, que ya reserva esa región de RAM para ramoops
+   de fábrica) + `super_halium_raw.img`; dejar colgar ~90s; reset forzado
+   **sin cortar batería** (para no perder la retención de la RAM reservada);
+   reflashear `boot_rooted2.img` + `super_stock.img`; leer
+   `/sys/fs/pstore/console-ramoops-0` con `adb shell su -c cat ...`
+   inmediatamente, sin ningún boot de por medio.
+   - **Primer intento**: pstore vino completamente vacío. Ningún archivo en
+     `/sys/fs/pstore/`. Probable pérdida total de retención de RAM durante
+     ese reset puntual (variabilidad de hardware/eléctrica, no algo que se
+     pueda controlar desde software).
+   - **Error propio a evitar**: flashear `--boot` y `--super` en comandos
+     separados de Heimdall es un error — Heimdall **reinicia el equipo
+     automáticamente** apenas termina de subir la partición, así que un
+     `--boot` solo deja al equipo booteando de inmediato con una
+     combinación cruzada (kernel nuevo + partición vieja) antes de poder
+     flashear la otra mitad. **Siempre flashear `--boot` y `--super` juntos
+     en el mismo comando** cuando se necesita que ambos cambien atómicamente
+     antes del próximo boot.
+   - **Segundo intento (con el fix de arriba)**: pstore sí trajo contenido
+     (con corrupción de bits — bit-flips típicos de una región de RAM con
+     retención parcial durante el reset), pero resultó ser un **hallazgo
+     falso positivo**: un panic real, `kernel BUG at
+     drivers/samsung/sec_hard_reset_hook.c:134`, con call trace mostrando
+     que se disparó desde un `hrtimer` (`hard_reset_hook_callback`), **no**
+     desde el cuelgue de Halium. Revisando el código fuente
+     (`drivers/samsung/sec_hard_reset_hook.c`), es el propio mecanismo de
+     Samsung para la combinación de teclas Power+VolDown mantenida 6+
+     segundos: arma un timer, y si las teclas siguen apretadas al vencer,
+     dispara un `BUG()` **a propósito** para forzar un reset duro (comentario
+     en el código: "HQE team request hard reset key should guarantee 7
+     seconds"). Es decir, **el propio combo de reset forzado que usamos para
+     sacar al equipo del cuelgue se autodestruye y pisa el log real de
+     Halium con su propio panic dump** (call trace + tabla completa de
+     threads del kernel, bastante grande) en el buffer circular de pstore
+     (256KB). **Conclusión: pstore no es viable para este diagnóstico
+     mientras la única forma de salir del cuelgue sea ese combo de teclas.**
+4. **Hallazgo del debug telnet de `hybris-boot`** (documentado en
+   [docs.halium.org](https://docs.halium.org/en/latest/porting/debug-build/early-init.html)):
+   cuando el sistema Halium falla al bootear, `initramfs-tools-halium`
+   levanta automáticamente una interfaz de red USB (RNDIS) en
+   `192.168.2.15` con un `telnetd` en el puerto 23 — **sin necesitar pstore
+   ni resets**. Confirmado que esto sí ocurre en nuestro equipo: aparece en
+   el host como un dispositivo USB separado (`18d1:d001`, fabricante
+   "Halium initrd", producto "Failed to boot") y el string `iSerial` del
+   descriptor USB literalmente dice
+   `"Halium initrd Debug telnet on port 23 on rndis0 192.168.2.15 - also
+   running udhcpd"` (visible con `dmesg`/`journalctl -k` del lado del host
+   sin necesitar red configurada). El host recibe IP por DHCP del propio
+   equipo (udhcpd corriendo del lado de Halium).
+   - **Problema encontrado**: conectar por telnet (`telnet 192.168.2.15`,
+     o un socket crudo con negociación IAC) resulta en conexión aceptada
+     pero cerrada instantáneamente (0 bytes, EOF inmediato) — el shell
+     interactivo nunca se llega a usar. Revisando
+     `scripts/panic/telnet` dentro del propio initramfs de Halium (extraído
+     de `halium-boot-artifacts/halium-initramfs.gz`), la línea responsable
+     es `busybox telnetd -b $IP:$PORT -l /bin/sh` (BusyBox v1.22.1, del
+     2013). Se descartó que sea un binario faltante (`/bin/sh` existe y es
+     válido, hardlinkeado a `busybox`) o falta de `/dev/pts` (el `init` del
+     ramdisk sí lo monta bien antes del punto donde correría este script).
+     Causa más probable: un bug de auto-demonización de esa versión vieja de
+     BusyBock en un entorno initramfs mínimo.
+   - **Intento de fix**: cambiar la invocación a
+     `telnetd -F -b $IP:$PORT -l /bin/sh &` (foreground explícito +
+     backgrounding manual por el shell, evitando la lógica interna de
+     daemonización de BusyBox) — **todavía sin confirmar si funciona**, un
+     primer intento con 6 llamadas adicionales a `usb_info()` (cada una
+     fuerza una re-enumeración del gadget USB al reescribir el string
+     `iSerial`) desestabilizó el controlador USB del host ("Cannot enable,
+     Maybe the USB cable is bad?", ciclos de disconnect/reconnect) y el
+     equipo terminó reiniciándose solo. Se corrigió consolidando el
+     diagnóstico extra en **una sola** llamada a `usb_info()`, pero el
+     intento siguiente no volvió a mostrar la interfaz de debug dentro de
+     varios minutos (vs. los ~90s habituales) — no está claro todavía si es
+     por la propia fragilidad del puerto USB (ya venía dando errores) o por
+     algo introducido en el script. **No confirmado, pendiente para la
+     próxima sesión.**
+   - **`nc` (netcat) no está compilado en este BusyBox** (`strings` sobre el
+     binario no encuentra el applet), así que un enfoque alternativo sin pty
+     (`nc -l -p PORT -e /bin/sh`) no es viable acá.
+   - Ramdisk parcheado y boot.img resultantes en
+     `halium-boot-artifacts/halium-boot-ramoops3.img` (kernel bueno +
+     ramdisk con el fix de telnetd + mismo cmdline de ramoops). El ramdisk
+     original sin modificar sigue en
+     `halium-boot-artifacts/halium-initramfs.gz` por si hace falta
+     comparar.
+
+**Plan para la próxima sesión, en orden de preferencia:**
+1. Confirmar si el fix de `telnetd -F ... &` funciona dándole más intentos
+   con paciencia (o reintentando en un puerto/cable USB distinto, dado que
+   esta sesión mostró señales de que el puerto/cable actual está marginal).
+2. Si telnetd sigue fallando, compilar `hybris-recovery.img` (`mka
+   hybris-recovery` dentro del árbol de Halium ya sincronizado) — una
+   imagen de arranque separada, pensada específicamente como entorno de
+   rescate/debug con un shell ya andando, en vez de depender del gancho de
+   pánico del ramdisk normal (que es donde está el bug de telnetd).
+3. Como alternativa más agresiva, agregar el `USB_FUNCTIONS="rndis
+   mass_storage"` al mismo script de debug, respaldado por un archivo crudo
+   con el diagnóstico volcado como texto plano — el host lo leería con
+   `dd`/`strings` directo del dispositivo de bloque expuesto, sin depender
+   de red ni de pty en absoluto. No implementado todavía, pendiente
+   confirmar que el kernel tenga habilitado el gadget de mass storage por
+   configfs.
 
 ### Fase 3 — libhybris + HALs
 - [ ] Conectar hwcomposer2 para salida de pantalla.

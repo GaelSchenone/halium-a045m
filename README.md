@@ -29,9 +29,23 @@ reproducibly partway through with the repacked image as a sparse file
 (confirmed cause: too many sparse chunks — 4760 vs. 168 in the stock
 image). Repacking it as raw instead flashed cleanly on the first try. With
 both flashed, the device boots as far as the "bootloader unlocked" warning
-screen and hangs there — no serial console available yet to see why. The
-device was restored to a clean stock state. See PORTING.md for full details
-and next steps for getting boot logs.
+screen and hangs there, with no USB interface exposed — no serial console
+available on this hardware.
+
+To debug the hang without opening the device, it was rooted with Magisk (to
+read `/sys/fs/pstore/`) and several capture attempts were made. pstore turned
+out not to be viable here: the only way found to force the device out of the
+hang (a hardware key-combo reset) itself triggers a deliberate kernel
+`BUG()` (Samsung's own "hold Power+VolDown 7s" hard-reset mechanism), which
+overwrites the actual hang's log with its own panic dump before it can be
+read. A more promising path was found instead: Halium's own `hybris-boot`
+exposes a USB-networked telnet debug shell automatically when boot fails
+(confirmed reaching this device — the host sees a distinct USB descriptor,
+"Halium initrd" / "Failed to boot", handing out DHCP over RNDIS), but the
+bundled BusyBox `telnetd` (v1.22.1) fails to actually attach a shell to the
+connection. A fix attempt is in progress; see PORTING.md for the full
+investigation and next steps (most likely candidate: building
+`hybris-recovery.img` as a more reliable debug environment).
 
 See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
 detailed log of every issue found and fixed so far.
@@ -126,9 +140,14 @@ damage. Use `git clean -fdx` inside `kernel/` instead, or the `O=`-scoped
    ~18% (too many sparse chunks — 168 in the original vs. 4760 in ours);
    repacking as raw instead flashed cleanly.
 6. **First boot attempt** — hangs at the bootloader warning screen, no
-   crash, no recovery prompt, nothing visible past that point. No serial
-   console yet to see why. Device recovered to a clean stock state. See
-   PORTING.md for next steps to get boot logs.
+   crash, no recovery prompt, nothing visible past that point, no USB
+   interface exposed. Device rooted (Magisk) to enable further debugging.
+   pstore/ramoops ruled out as a diagnostic path (the only recovery method
+   found overwrites it with its own panic dump). Halium's built-in
+   USB-networked telnet debug shell was confirmed reachable on this device,
+   but its `telnetd` has a bug preventing an actual shell from attaching —
+   a fix is in progress, with `hybris-recovery.img` as the fallback plan.
+   See PORTING.md for the full investigation.
 7. Wire up `libhybris` and the HALs: display, input, audio, sensors.
 8. Bring up a Halium-generic rootfs (postmarketOS or Ubuntu Touch base).
 9. Iterative hardware bring-up: display, touch, Wi-Fi, audio, modem/RIL,
