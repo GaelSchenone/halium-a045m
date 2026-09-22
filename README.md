@@ -56,8 +56,25 @@ platform-level Android.bp that hardcodes all four versions. After clearing
 that, `hybris-recovery` itself turned out not to be a valid build target in
 this Halium checkout at all — neither the (also missing, since separately
 found and added) Halium recovery fork nor `halium-boot`'s own build rules
-define it, and its actual source wasn't tracked down before pausing for the
-night. See PORTING.md for the full investigation and next steps.
+define it, and it may simply be obsolete in Halium 12 (the docs describing
+it reference the old LXC-container architecture from Halium 9-11).
+
+The debug telnet path was resolved instead, with a working shell obtained
+for the first time. Two real, unrelated bugs were found and fixed:
+repacking the ramdisk as a non-root user silently records the invoking
+user's UID/GID in the cpio archive instead of root's, which breaks early
+boot outright (fixed with `fakeroot`) — this had been masking every prior
+attempt at fixing `telnetd` itself; and `/dev/ptmx` is simply missing from
+this ramdisk's `/dev` (`/dev/pts/ptmx`, the underlying devpts multiplexer,
+is present, but the conventional top-level symlink isn't), which is why no
+program — `telnetd` included — could ever allocate a pty. With a one-line
+`ln -s pts/ptmx /dev/ptmx` added before starting `telnetd -F`, a real
+interactive shell finally comes up. That shell confirms the actual hang:
+`/proc/mounts` never gains a `/system` or `/vendor` entry, and `ps` shows
+nothing beyond kernel threads and the debug script's own `/init` — the boot
+fails before `mountroot` ever attempts to mount the dynamic partitions from
+`super`. See PORTING.md for the full investigation, including a workaround
+still needed for `telnetd` only accepting one interaction per connection.
 
 See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
 detailed log of every issue found and fixed so far.

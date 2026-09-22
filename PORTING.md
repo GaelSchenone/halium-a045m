@@ -642,21 +642,85 @@ en vez del `/dev/pts` ya configurado del host) quedó bloqueado por
 necesitaría `sudo` para deshabilitarlo temporalmente o probar directo en el
 celular.
 
+**RESUELTO — shell de debug real conseguido (el objetivo de toda esta
+investigación):**
+
+Con el cable USB cambiado (para descartar variables), se retomó el intento
+de arreglar `telnetd`, y esta vez se aisló bien la causa real en varios
+pasos:
+
+1. **Bug real y grande encontrado, no relacionado con el script**: todos los
+   intentos anteriores de esta sesión que "no mostraban nada en absoluto"
+   (ni siquiera el banner USB inicial) resultaron tener la MISMA causa: el
+   proceso de reempaquetado del ramdisk (`find . | cpio -o -H newc | gzip`)
+   corrido como usuario normal graba los archivos con el **UID/GID del
+   usuario actual** en vez de `root:root` (el `cpio` original del ramdisk
+   de Halium sí los tiene como `root:root`). El kernel, al desempaquetar un
+   initramfs, respeta literalmente esos UID/GID — un ramdisk entero
+   "poseído" por un usuario no-root en vez de root rompe el arranque
+   temprano por completo. **Fix**: usar `fakeroot` al reempaquetar
+   (`fakeroot bash -c 'chown -R root:root . && find . | cpio -o -H newc |
+   gzip -9 > ...'`), sin necesitar `sudo` real. Confirmado con una prueba de
+   control: reempaquetar el script ORIGINAL sin ningún cambio de contenido,
+   con este bug de ownership, también fallaba en cero; con `fakeroot`
+   corregido, funcionó igual que el original sin tocar. **Este es un
+   hallazgo reutilizable para cualquier ramdisk que se reempaquete de acá en
+   adelante.**
+2. Con el ownership arreglado, `telnetd -F ... &` seguía sin dar shell
+   (conectaba y se quedaba mudo, o directamente rechazaba la conexión según
+   el intento) — se agregó una línea extra de diagnóstico vía el string
+   `iSerial` del USB (el mismo canal confiable de siempre) chequeando si
+   `/dev/ptmx` existía. **Resultado: `/dev/ptmx` no existe en este
+   ramdisk**, aunque `/dev/pts/ptmx` (el multiplexor interno de devpts) sí.
+   Sin `/dev/ptmx`, ningún programa (telnetd incluido) puede abrir una
+   pseudo-terminal nueva — exactamente la causa de que la conexión se
+   aceptara pero nunca diera un shell utilizable, durante *todas* las
+   sesiones anteriores con el ramdisk original también.
+3. **Fix**: agregar `[ -e /dev/ptmx ] || ln -s pts/ptmx /dev/ptmx` en
+   `scripts/panic/telnet`, antes de arrancar `telnetd`. **Con esto,
+   `telnetd` dio un shell real y funcional por primera vez en toda la
+   investigación** (`BusyBox v1.22.1 ... / #`, con negociación de protocolo
+   telnet correcta, comandos ejecutándose de verdad).
+
+**Diagnóstico obtenido del shell real (el objetivo original de Fase 2):**
+`/proc/mounts` durante el cuelgue muestra únicamente `rootfs`, `sysfs`,
+`proc`, `devpts`, `tmpfs` (`/run`) y `configfs` — **ninguna partición real
+(`/system`, `/vendor`, `/data`, etc.) llega a montarse nunca**. `ps -ef`
+solo muestra `/init` (PID 1, bloqueado en el `inject_loop` de nuestro
+propio script de debug, como se espera) y threads del kernel (`kthreadd`,
+`rcu_*`, `kworker/*`, `migration/*`, etc.) — ningún proceso de userspace
+adicional llegó a arrancar. **Conclusión: el cuelgue de Halium pasa antes
+de que `mountroot` intente siquiera montar las particiones lógicas del
+`super`** — no es un problema de HALs, de sistema de archivos corrupto, ni
+de algo tardío en el arranque; es un problema muy temprano en el script de
+montaje (`scripts/local` / lo que sea que decida cómo montar `/system` para
+este dispositivo).
+
+**Limitación encontrada**: cada conexión nueva a `telnetd -F` solo permite
+una interacción/comando útil antes de cortarse (no parece depender del
+tamaño de la salida — hasta `cat /proc/cmdline`, una sola línea, se cortó a
+mitad de camino en un intento) — hay que reconectar entre cada comando.
+Suficiente para diagnóstico dirigido, molesto para una sesión exploratoria
+larga.
+
 **Para la próxima sesión:**
-1. Dado que `telnetd` funciona bien en aislamiento, priorizar volver a
-   probar el fix `telnetd -F ... &` (`halium-boot-ramoops3.img`, ya armado)
-   directo en el celular con paciencia, posiblemente con otro cable/puerto
-   USB físico — el hardware, no el software, es la sospecha principal
-   ahora.
-2. Si se quiere seguir con `hybris-recovery` de todos modos, preguntar en
-   los canales de Matrix de Halium/UBports cuál es el mecanismo actual para
-   forzar un shell de debug en Halium 12 (puede que ya no se llame
-   `hybris-recovery`).
+1. Usar el shell de debug ya funcional (con el fix de `/dev/ptmx`, imagen
+   `halium-boot-ptmxfix.img`) para investigar **qué hace fallar el mount de
+   `/system`/`/vendor` antes de siquiera intentarlo** — revisar el script
+   `scripts/local` (o el que corresponda) de `initramfs-tools-halium` para
+   ver la lógica de montaje de particiones lógicas dynamic-partitions, y
+   comparar contra lo que realmente expone el kernel (`ls /dev/block/`,
+   `cat /proc/partitions`, etc., un comando por conexión).
+2. Si la limitación de "una interacción por conexión" molesta mucho,
+   investigar si hay alguna forma de que `telnetd` acepte múltiples
+   conexiones secuenciales sin necesitar reflashear cada vez (por ejemplo,
+   envolviendo `telnetd` en un `while :; do ... ; done` en el script, ya
+   que sabemos que sí puede volver a arrancar solo con otro reset).
 3. El fix de VNDK (symlinks + truncar `packages/modules/vndk/apex/
    Android.bp` a solo `current`+`v31` + mover v28/v29/v30 fuera del árbol +
-   placeholders puntuales bajo `out/`) es **reutilizable** para cualquier
-   build futuro en este árbol de Halium que dispare el mismo problema —
-   dejarlo documentado acá para no tener que redescubrirlo.
+   placeholders puntuales bajo `out/`) sigue siendo reutilizable si se
+   retoma `hybris-recovery` más adelante, aunque dejó de ser prioritario
+   ahora que el debug telnet funciona.
 4. El local_manifest quedó con un `<remove-project>` que rompe `repo sync`
    sin argumentos (tira el mismo error de "non-existent project") — si se
    necesita volver a correr `repo sync` completo en esa PC, revisar/sacar
