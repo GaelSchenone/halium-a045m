@@ -43,9 +43,21 @@ exposes a USB-networked telnet debug shell automatically when boot fails
 (confirmed reaching this device — the host sees a distinct USB descriptor,
 "Halium initrd" / "Failed to boot", handing out DHCP over RNDIS), but the
 bundled BusyBox `telnetd` (v1.22.1) fails to actually attach a shell to the
-connection. A fix attempt is in progress; see PORTING.md for the full
-investigation and next steps (most likely candidate: building
-`hybris-recovery.img` as a more reliable debug environment).
+connection — a fix is still unconfirmed.
+
+As an alternative, work moved to building `hybris-recovery.img` (a
+purpose-built debug/rescue image) on a second machine over the LAN, which
+surfaced and fully resolved a real, reusable build issue: this checkout's
+VNDK prebuilt snapshots (v28-v31) reference generated interface headers via
+a relative `include/out` path that needs a symlink back into the main
+build's `out/` tree — one that never existed, plus one snapshot version
+(v30) turned out to be entirely unnecessary and had to be excised from a
+platform-level Android.bp that hardcodes all four versions. After clearing
+that, `hybris-recovery` itself turned out not to be a valid build target in
+this Halium checkout at all — neither the (also missing, since separately
+found and added) Halium recovery fork nor `halium-boot`'s own build rules
+define it, and its actual source wasn't tracked down before pausing for the
+night. See PORTING.md for the full investigation and next steps.
 
 See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
 detailed log of every issue found and fixed so far.

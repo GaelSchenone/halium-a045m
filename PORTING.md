@@ -495,6 +495,145 @@ varios pasos para poder leer algo del kernel de Halium sin abrir el equipo:
    confirmar que el kernel tenga habilitado el gadget de mass storage por
    configfs.
 
+**Cuarto intento — build de `hybris-recovery.img` en una segunda PC (evita el
+crash por RAM):**
+
+Al intentar el fix de telnetd de nuevo, `soong_build` volvió a comerse toda
+la RAM de esta máquina y **crasheó la sesión de escritorio** — el mismo
+problema de la Fase 2, porque el swapfile extra de 24GB que habíamos armado
+antes existía en disco (`/swapfile_build`) pero **no estaba activado**
+(`swapon` no persiste solo entre reinicios sin una entrada en `/etc/fstab`).
+Recuperado sin pérdida de datos (el repo git y el árbol de Halium en el
+disco externo quedaron intactos).
+
+En vez de seguir peleando con los límites de RAM de esta máquina, se migró
+todo el trabajo de Halium a una segunda PC en la misma red local (16GB RAM,
+aunque con un HDD mecánico en vez de SSD) vía SSH/rsync:
+- Se generó una clave SSH dedicada y se copió con `ssh-copy-id` para no
+  tener que compartir contraseñas en ningún momento (las credenciales de
+  sudo/SSH son responsabilidad exclusiva de quien las administra — nunca se
+  las debe pedir ni procesar).
+- Se copió el árbol completo de Halium (~89GB, sin `out/`) y por separado el
+  `out/` del build anterior (~55GB, ya reducido de los ~224GB originales
+  tras limpiezas de disco entre sesiones) por `rsync` sobre la LAN — mucho
+  más rápido que un `repo sync` nuevo desde cero, y preserva los patches ya
+  aplicados (`halium-patches/`).
+- Verificado que los tamaños coincidieran exactamente entre origen y
+  destino antes de borrar las copias locales (89GB + 55GB liberados en esta
+  máquina).
+- Armado un symlink `halium/out -> halium-build-out` en la máquina remota
+  para reconstituir la misma estructura.
+
+**Hallazgo real, no relacionado con la migración:** el primer intento de
+`mka hybris-recovery` en la máquina nueva falló con ~995 errores, todos del
+mismo patrón: `module source path "prebuilts/vndk/vXX/arm64/include/out/
+soong/.intermediates/.../gen" does not exist`, en los snapshots VNDK v30 y
+v31. La causa es que los `Android.bp` de esos snapshots VNDK referencian
+rutas relativas tipo `"include/out/soong/.intermediates/..."`, que esperan
+un symlink llamado `out` dentro de `prebuilts/vndk/vXX/<arch>/include/`
+apuntando al `out/` real del árbol — **symlink que nunca existió ni en la
+máquina original ni en la copia** (no es un artefacto de la migración por
+rsync, es un gap real de este checkout de Halium que simplemente nunca se
+había ejercitado porque el build de `system.img` no toca estos módulos VNDK
+puntuales). Confirmado que el contenido generado que faltaba sí existe
+dentro de `out/` (ya se había generado durante el build de `system.img`).
+
+**Resolución completa del problema de VNDK (varias vueltas hasta cerrarlo
+del todo):**
+
+1. **Symlinks `include/out`**: crear el symlink a mano para cada
+   arquitectura de v28-v31:
+   ```sh
+   for v in v30 v31; do
+     for arch in arm64 arm x86_64 x86; do
+       d="<ruta al árbol de halium>/prebuilts/vndk/$v/$arch/include"
+       [ -d "$d" ] && [ ! -e "$d/out" ] && ln -s <ruta al árbol de halium>/out "$d/out"
+     done
+   done
+   ```
+   Esto redujo los errores de 995 a 7 — confirma que el symlink resuelve la
+   mayoría de los casos, pero **7 rutas puntuales de `libbinder`/`libgui`/
+   `libhidlallocatorutils` (variantes vendor de v31) no existían realmente
+   dentro de `out/`**, porque nuestro build anterior de `system.img` nunca
+   había compilado esas variantes vendor-side específicas.
+
+2. **Intentar compilar esas 3 libs directamente (`mka libbinder libgui
+   libhidlallocatorutils`) empeoró las cosas**: Soong evalúa **todo** el
+   árbol de módulos antes de compilar cualquier cosa (no solo lo pedido), y
+   esto hizo que se evaluara también el snapshot VNDK v30 completo, sacando
+   a la luz decenas de rutas faltantes nuevas (wifi, radio, keymaster, cas,
+   soundtrigger, automotive, etc. — básicamente toda la superficie HIDL/AIDL
+   de `hardware/interfaces/`). **Lección clave: Soong analiza el grafo de
+   módulos completo en cada invocación de `mka`, sin importar qué target se
+   pida — un error de "path no existe" en CUALQUIER módulo del árbol bloquea
+   la generación de `build.ninja` para TODO, incluso targets no
+   relacionados.**
+
+3. **v30 resultó no ser necesario en absoluto**: revisando
+   `out/soong/soong.variables` generado, `ExtraVndkVersions = ['31']` — solo
+   v31 hace falta para este producto. Intentar simplemente *renombrar* la
+   carpeta `prebuilts/vndk/v30` no sirvió (Soong globa cualquier archivo
+   literalmente llamado `Android.bp` en cualquier subdirectorio, sin
+   importar el nombre de la carpeta padre) — hubo que **moverla fuera del
+   árbol de Halium por completo** (`mv prebuilts/vndk/v30 /otro/lugar`).
+   Esto reveló un segundo problema: `packages/modules/vndk/apex/Android.bp`
+   (código genérico de la plataforma, no específico de Halium) define un
+   módulo `apex_vndk` por cada versión (v28 a v31) con bloques hardcodeados,
+   y esos bloques referencian por nombre módulos generados dentro de la
+   propia carpeta `prebuilts/vndk/vXX/` (como `llndk.libraries.30.txt`) — si
+   la carpeta desaparece pero el bloque `apex_vndk` sigue ahí, falla por
+   "depends on undefined module" en vez de "path no existe". **Fix real**:
+   truncar ese archivo (`packages/modules/vndk/apex/Android.bp`, se guardó
+   backup como `Android.bp.orig`) dejando solo los bloques `current` y
+   `v31`, y mover **v28, v29 y v30** fuera del árbol (`prebuilts/vndk/` solo
+   con `v31` adentro).
+4. Con eso, los errores bajaron a un puñado de rutas puntuales de v31
+   (arquitectura `arm` de 32 bits además de `arm64`, y un par de libs
+   nuevas: `libc`, `libmedia_omx`). Se resolvieron creando manualmente los
+   directorios placeholder faltantes (vacíos, `mkdir -p`) bajo `out/`, ya
+   que **Soong solo valida que el directorio exista, no su contenido, en
+   esta fase de análisis** — el análisis completo (240/240 makefiles, Kati
+   + Soong) terminó sin errores por primera vez.
+
+**Resultado final de la sesión — `hybris-recovery` no es un target válido en
+este checkout:** una vez pasado el análisis, `ninja` devolvió
+`unknown target 'hybris-recovery'` — ese nombre de target simplemente no
+está definido en ningún Makefile/Android.bp sincronizado. Se investigó:
+- El manifest de Halium trae `bootable/recovery` = **LineageOS/
+  android_bootable_recovery** (el recovery stock de LineageOS), no un fork
+  de Halium. Se encontró y clonó a mano el fork correcto,
+  [`ubports/halium_bootable_recovery`](https://github.com/ubports/halium_bootable_recovery)
+  (rama `halium-12.0`, coincide exactamente con nuestra versión) — el
+  `repo sync` con `remove-project` para reemplazarlo dentro del manifest
+  dio error (`remove-project element specifies non-existent project`, sin
+  resolver por qué); se resolvió clonándolo directo con `git clone` sobre
+  `bootable/recovery`, sin pasar por `repo`.
+- Ni ese repo ni `bootable/halium-boot` (que sí define el target
+  `halium-boot`) definen `hybris-recovery` en ningún Makefile/Android.bp.
+  Puede ser un nombre de target de una versión más vieja de Halium
+  (halium-9/10/11) que ya no existe igual en halium-12, o requerir un
+  componente adicional no identificado todavía. **No resuelto.**
+
+**Para la próxima sesión:**
+1. Investigar en el propio código de `ubports/halium_bootable_recovery`
+   (halium-12.0) o en foros/Matrix de Halium cuál es el nombre de target
+   correcto para esta versión (puede ser simplemente `recoveryimage` con
+   alguna variable `BOARD_*`/`TARGET_*` extra activada, no un nombre
+   nuevo).
+2. Si no aparece, volver al plan original: terminar de confirmar el fix de
+   `telnetd -F ... &` para el debug telnet de `hybris-boot` (que sí
+   confirmamos alcanzable desde el host), dándole más paciencia o probando
+   otro puerto/cable USB.
+3. El fix de VNDK (symlinks + truncar `packages/modules/vndk/apex/
+   Android.bp` a solo `current`+`v31` + mover v28/v29/v30 fuera del árbol +
+   placeholders puntuales bajo `out/`) es **reutilizable** para cualquier
+   build futuro en este árbol de Halium que dispare el mismo problema —
+   dejarlo documentado acá para no tener que redescubrirlo.
+4. El local_manifest quedó con un `<remove-project>` que rompe `repo sync`
+   sin argumentos (tira el mismo error de "non-existent project") — si se
+   necesita volver a correr `repo sync` completo en esa PC, revisar/sacar
+   esa línea de `.repo/local_manifests/device.xml` primero.
+
 ### Fase 3 — libhybris + HALs
 - [ ] Conectar hwcomposer2 para salida de pantalla.
 - [ ] Input (esto sí te va a andar bien acá, a diferencia del S9 con táctil
