@@ -703,15 +703,68 @@ mitad de camino en un intento) — hay que reconectar entre cada comando.
 Suficiente para diagnóstico dirigido, molesto para una sesión exploratoria
 larga.
 
+**Investigación en vivo del mount de `/system`/`/vendor` (misma sesión,
+usando ya el shell de debug funcional):**
+
+Usando `halium-boot-ptmxfix.img`, con un comando por conexión (reflasheando
+entre cada uno para minimizar la degradación de la sesión — ver
+"Limitación encontrada" abajo), se fue acotando el problema:
+
+- **`/dev/block` no existe en absoluto** en el momento del cuelgue — ningún
+  nodo de dispositivo de bloque, ni siquiera vacío.
+- **`/proc/devices` sí lista `179 mmc`** en la sección de "Block devices" —
+  el subsistema/driver de bloque de MMC **sí se registró** en el kernel, no
+  es un problema de driver faltante o mal compilado.
+- **`/sys/class/mmc_host/` tiene `mmc0` y `mmc1`** — dos controladores host
+  MMC/eMMC se inicializaron correctamente (probablemente eMMC interno +
+  WiFi por SDIO, u otra combinación; no confirmado cuál es cuál).
+- **`/sys/class/mmc_host/mmc0` tiene un hijo `mmc0:0001`** — es decir, **se
+  detectó una tarjeta/dispositivo real conectado a `mmc0`** (respondió al
+  protocolo MMC, se le asignó un RCA). Confirmado con el usuario que este
+  equipo **no tiene bandeja de microSD física** ni tarjeta insertada, así
+  que `mmc0` casi seguro es el eMMC interno real (no un lector de SD vacío
+  que por alguna razón mostrara un dispositivo).
+- Pendiente confirmar (no se llegó a leer antes de que la conexión se
+  cortara): si `mmc0:0001` tiene una subcarpeta `block/` (que confirmaría
+  que el driver `mmc_block` sí se enganchó al dispositivo mmc, y el
+  problema sería solo la falta del nodo en `/dev`, no del bind del driver),
+  o si directamente no la tiene (confirmando que `mmc_block` nunca llegó a
+  bindearse a esta tarjeta en particular pese a que el protocolo MMC
+  funcionó).
+
+**Conclusión más probable a esta altura**: el hardware/protocolo MMC
+funciona (el eMMC responde y se enumera), pero **el driver de bloque nunca
+crea el nodo `/dev/mmcblk0`** — el problema está en algún punto entre la
+detección de la tarjeta y el bind del driver `mmc_block`, no en el
+controlador MMC en sí ni en el propio script de montaje de Halium (que ni
+siquiera llega a intentar nada, porque nunca hay una partición para montar
+en primer lugar).
+
+**Limitación encontrada**: cada conexión nueva a `telnetd -F` solo permite
+una interacción/comando útil antes de cortarse, y esto **empeora
+notablemente con conexiones sucesivas dentro del mismo boot** (la primera
+conexión después de un flasheo fresco suele funcionar bien — a veces con
+una respuesta completa larga —, la segunda ya viene truncada, la tercera
+casi no responde nada). Reflashear entre cada comando puntual da resultados
+mucho más confiables que reutilizar la misma sesión de boot para varias
+preguntas seguidas. No se investigó la causa raíz de este límite (podría
+ser un problema de recursos del propio `telnetd -F`/pty, o alguna
+degradación más general del sistema mientras el kernel sigue reintentando
+algo en background relacionado al propio problema de storage).
+
 **Para la próxima sesión:**
 1. Usar el shell de debug ya funcional (con el fix de `/dev/ptmx`, imagen
-   `halium-boot-ptmxfix.img`) para investigar **qué hace fallar el mount de
-   `/system`/`/vendor` antes de siquiera intentarlo** — revisar el script
-   `scripts/local` (o el que corresponda) de `initramfs-tools-halium` para
-   ver la lógica de montaje de particiones lógicas dynamic-partitions, y
-   comparar contra lo que realmente expone el kernel (`ls /dev/block/`,
-   `cat /proc/partitions`, etc., un comando por conexión).
-2. Si la limitación de "una interacción por conexión" molesta mucho,
+   `halium-boot-ptmxfix.img`) para confirmar si `/sys/class/mmc_host/mmc0/
+   mmc0:0001/block` existe (un comando, reflasheando fresco antes), y
+   revisar `dmesg` filtrado por `mmc`/`msdc` (aunque `dmesg` viene fallando
+   sistemáticamente incluso con `grep`/`head` de por medio — probar
+   `dmesg -c` o leer `/proc/kmsg` con `dd` en su lugar si sigue fallando).
+2. Revisar el script `scripts/local` (o el que corresponda) de
+   `initramfs-tools-halium` para ver la lógica de montaje de particiones
+   lógicas dynamic-partitions — aunque dado que ni siquiera existe
+   `/dev/block`, es más probable que el problema esté aguas arriba (en el
+   driver/hardware), no en la lógica de montaje en sí.
+3. Si la limitación de "una interacción por conexión" molesta mucho,
    investigar si hay alguna forma de que `telnetd` acepte múltiples
    conexiones secuenciales sin necesitar reflashear cada vez (por ejemplo,
    envolviendo `telnetd` en un `while :; do ... ; done` en el script, ya
