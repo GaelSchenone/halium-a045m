@@ -610,20 +610,48 @@ está definido en ningún Makefile/Android.bp sincronizado. Se investigó:
   `bootable/recovery`, sin pasar por `repo`.
 - Ni ese repo ni `bootable/halium-boot` (que sí define el target
   `halium-boot`) definen `hybris-recovery` en ningún Makefile/Android.bp.
-  Puede ser un nombre de target de una versión más vieja de Halium
-  (halium-9/10/11) que ya no existe igual en halium-12, o requerir un
-  componente adicional no identificado todavía. **No resuelto.**
+- Revisando la doc oficial (`docs.halium.org/.../early-init.rst`, fuente
+  cruda en GitHub) que documenta este flujo, el texto menciona
+  `lxc@android` y `systemctl` dentro de un `chroot target/` — es decir,
+  describe la arquitectura **vieja** de Halium (9-11, basada en contenedor
+  LXC para el rootfs), no la de Halium 12. Es muy probable que
+  `hybris-recovery` haya sido **eliminado o rearmado de otra forma** al
+  modernizar la arquitectura, y que la doc esté desactualizada para esta
+  versión. Se rastreó el repo `Halium/hybris-patches` (parches que se
+  aplican sobre el árbol synced, vía `apply-patches.sh`, nunca aplicados en
+  este checkout) buscando si algún parche agregaba el target — no se
+  encontró nada relacionado. **Conclusión: no resuelto, y probablemente no
+  vale la pena seguir insistiendo con este camino puntual** salvo que
+  aparezca un dato nuevo (foro/Matrix de Halium).
+
+**Hallazgo importante sobre el fix de `telnetd` (invalida parte de lo que
+se pensaba antes):** usando `qemu-user` (`qemu-aarch64-static`, binario
+portátil bajado sin necesitar `sudo`/instalación de paquetes) se pudo correr
+el `busybox` ARM64 real del ramdisk de Halium **en esta PC, sin el celular
+para nada**, y probar `telnetd -F -b 127.0.0.1:PUERTO -l /bin/sh` en
+aislamiento. **Funcionó perfecto**: conexión aceptada, shell interactivo
+real, `ls` devolvió el listado correcto del ramdisk. Esto **descarta que el
+binario de `telnetd` esté roto** — la teoría de "bug de BusyBox 1.22.1" de
+la Fase 2 anterior era probablemente incorrecta. El fallo real en el
+dispositivo es más probablemente la inestabilidad del puerto/cable USB que
+veníamos sufriendo (mensajes "Cannot enable, Maybe the USB cable is bad?"),
+no un problema del software del ramdisk. Intentar reproducir la condición
+exacta del dispositivo (mount fresco de `/dev/pts` en un namespace privado,
+en vez del `/dev/pts` ya configurado del host) quedó bloqueado por
+`apparmor_restrict_unprivileged_userns=1` en esta PC (Ubuntu 26.04) — se
+necesitaría `sudo` para deshabilitarlo temporalmente o probar directo en el
+celular.
 
 **Para la próxima sesión:**
-1. Investigar en el propio código de `ubports/halium_bootable_recovery`
-   (halium-12.0) o en foros/Matrix de Halium cuál es el nombre de target
-   correcto para esta versión (puede ser simplemente `recoveryimage` con
-   alguna variable `BOARD_*`/`TARGET_*` extra activada, no un nombre
-   nuevo).
-2. Si no aparece, volver al plan original: terminar de confirmar el fix de
-   `telnetd -F ... &` para el debug telnet de `hybris-boot` (que sí
-   confirmamos alcanzable desde el host), dándole más paciencia o probando
-   otro puerto/cable USB.
+1. Dado que `telnetd` funciona bien en aislamiento, priorizar volver a
+   probar el fix `telnetd -F ... &` (`halium-boot-ramoops3.img`, ya armado)
+   directo en el celular con paciencia, posiblemente con otro cable/puerto
+   USB físico — el hardware, no el software, es la sospecha principal
+   ahora.
+2. Si se quiere seguir con `hybris-recovery` de todos modos, preguntar en
+   los canales de Matrix de Halium/UBports cuál es el mecanismo actual para
+   forzar un shell de debug en Halium 12 (puede que ya no se llame
+   `hybris-recovery`).
 3. El fix de VNDK (symlinks + truncar `packages/modules/vndk/apex/
    Android.bp` a solo `current`+`v31` + mover v28/v29/v30 fuera del árbol +
    placeholders puntuales bajo `out/`) es **reutilizable** para cualquier
