@@ -73,8 +73,22 @@ interactive shell finally comes up. That shell confirms the actual hang:
 `/proc/mounts` never gains a `/system` or `/vendor` entry, and `ps` shows
 nothing beyond kernel threads and the debug script's own `/init` — the boot
 fails before `mountroot` ever attempts to mount the dynamic partitions from
-`super`. See PORTING.md for the full investigation, including a workaround
-still needed for `telnetd` only accepting one interaction per connection.
+`super`.
+
+`telnetd` turned out to only ever be reliable for one interaction per
+connection, so an HTTP/CGI debug channel (`debug-initramfs/`, `busybox
+httpd`) was built to sidestep telnet/pty entirely — which surfaced a much
+bigger finding: a hardcoded, no-fork response (a 404 page) always arrives
+instantly and complete, but *anything requiring a forked child to read or
+write through the inherited network socket* — real static files, CGI
+command output, and `telnetd`'s own shell — hangs forever. The same class
+of hang was independently observed reading certain sysfs attributes (under
+`/sys/class/mmc_host/` and `/sys/class/android_usb/.../f_mass_storage/`),
+freezing `/init` (PID 1) itself mid-read. This looks like a real kernel bug
+— some sysfs `.show()` callback blocking forever in uninterruptible sleep —
+and is now the leading suspect for why Halium's own mount script never gets
+past discovering `/system`/`/vendor` in the first place. See PORTING.md for
+the full investigation and the plan to pin it down further.
 
 See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
 detailed log of every issue found and fixed so far.
@@ -129,6 +143,12 @@ halium-patches/  Patches applied inside halium/ that aren't upstream yet
                  reapply them after a clean repo sync.
 firmware/        Stock firmware backup + extracted boot.img pieces
                  (gitignored, several GB).
+debug-initramfs/ Tooling to build a debug boot.img: a patched copy of
+                 initramfs-tools-halium's scripts/panic/telnet (the /dev/
+                 ptmx fix, an HTTP/CGI debug channel), the boot.img
+                 assembly script, and an `hdbg` client. Run
+                 `debug-initramfs/build.sh` to produce
+                 halium-boot-artifacts/halium-boot-httpd.img.
 PORTING.md       Full roadmap, phase-by-phase status, and build log.
 ```
 

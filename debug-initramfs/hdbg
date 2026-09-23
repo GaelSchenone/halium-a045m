@@ -1,0 +1,28 @@
+#!/bin/bash
+# Client for the HTTP/CGI debug channel exposed by debug-initramfs/panic-telnet.
+#
+# Usage:
+#   hdbg 'shell command'    Run a command on the device, print its output.
+#   hdbg --diag             Fetch the static diagnostic dump (uname, mounts,
+#                            partitions, devices, mmc_host tree, ps, ...).
+#   hdbg --dmesg            Fetch the dmesg dump captured at boot time.
+
+set -euo pipefail
+
+HOST="192.168.2.15"
+
+case "${1:-}" in
+  --diag)
+    curl -sS --max-time 15 "http://$HOST/diag.txt"
+    ;;
+  --dmesg)
+    curl -sS --max-time 15 "http://$HOST/dmesg.txt"
+    ;;
+  "")
+    echo "usage: hdbg 'command' | hdbg --diag | hdbg --dmesg" >&2
+    exit 1
+    ;;
+  *)
+    curl -sS --max-time 30 --data-binary "$1" "http://$HOST/cgi-bin/run"
+    ;;
+esac

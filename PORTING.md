@@ -752,29 +752,100 @@ ser un problema de recursos del propio `telnetd -F`/pty, o alguna
 degradación más general del sistema mientras el kernel sigue reintentando
 algo en background relacionado al propio problema de storage).
 
+**Quinto intento — canal de debug por HTTP/CGI (`debug-initramfs/`), y el
+hallazgo real detrás de la fragilidad de `telnetd`:**
+
+Dado que `telnetd` seguía siendo inservible para investigar (cada sesión se
+cortaba a mitad del eco del comando, y empeoraba con cada conexión nueva en
+el mismo boot — ver más arriba), se armó un tooling versionado en
+`debug-initramfs/` (`panic-telnet`, `make_halium_boot.py`, `build.sh`,
+cliente `hdbg`) para dejar de depender del scratchpad (que se borra entre
+sesiones) y de un shell interactivo por pty.
+
+**Diagnóstico del problema real de `telnetd`:** se probó servir el mismo
+diagnóstico por HTTP (`busybox httpd` con CGI) en vez de por telnet, para
+sacar la complicación de pty/negociación telnet/line-editing de en medio.
+Resultado clave:
+- Una respuesta **generada directamente por el proceso principal de
+  `httpd`** (un 404 hardcodeado, sin leer ningún archivo) llega **perfecta
+  e instantánea**, con headers y cuerpo completos.
+- Servir el **contenido real de un archivo** (`diag.txt`, e incluso un
+  archivo trivial de 28 bytes creado con un simple `echo > archivo`) se
+  cuelga siempre: los headers HTTP llegan bien (`Content-Length` correcto,
+  confirmado por un test de socket crudo), pero **cero bytes del cuerpo
+  llegan nunca**, sin importar cuánto se espere.
+- Lo mismo pasa con el CGI (ejecutar un comando y devolver su salida): se
+  cuelga igual, a veces incluso antes de completar los propios headers.
+
+**Conclusión: no es un problema de red/MTU** (se probó bajar el MTU de la
+interfaz RNDIS del lado del host, sin efecto) **ni del protocolo** (HTTP no
+tiene pty ni negociación telnet, y falla igual). El patrón real es:
+*cualquier respuesta que dependa de un proceso hijo (`fork()`) leyendo o
+escribiendo a través del socket de red heredado se cuelga*, mientras que
+todo lo que el proceso **padre** hace directamente (el 404 de `httpd`, el
+string `iSerial` del descriptor USB que usamos toda la noche) funciona
+siempre. Esto es coherente con **todo** lo raro que vimos con `telnetd`
+desde el principio: acepta la conexión (el padre lo hace bien), pero nunca
+logra que el hijo forkeado (el shell interactivo) realmente hable a través
+del socket.
+
+**Intento de solucionarlo con mass storage (evita fork por completo, ya que
+el kernel sirve el bloque directo sin proceso de usuario):** se corrigió un
+bug real en el intento anterior de esta noche (`USB_FUNCTIONS` con espacio
+en vez de coma — el camino `android_usb` de este equipo espera una lista
+separada por comas, `"rndis,mass_storage"`, no por espacios) y se agregó el
+LUN backing file (`/tmp/diag.img`) tanto para el camino `configfs` como
+`android_usb`. Aun así, **la función mass_storage nunca se activó** (`lsusb
+-v` solo muestra las 2 interfaces de RNDIS, ninguna de mass storage). Al
+agregar un diagnóstico extra por `iSerial` para ver por qué (¿existe
+`f_mass_storage`? ¿qué dice `.../functions`?), **el propio script de init
+se quedó colgado leyendo alguno de esos atributos de sysfs** — el mismo
+patrón exacto que ya habíamos visto con `/sys/class/mmc_host/mmc0/
+mmc0:0001` en el intento anterior.
+
+**Esto es el hallazgo más importante de la noche:** parece haber **lecturas
+de atributos sysfs que cuelgan indefinidamente (estado D, ininterrumpible)
+en este kernel/hardware**, y no está acotado a un solo subsistema (ya lo
+vimos con MMC, y ahora con algo del lado de `android_usb`/`f_mass_storage`).
+Dado que el propio `/init` (PID 1) es el que se cuelga leyendo esto, **es
+muy probable que esta sea la causa raíz real de por qué Halium nunca monta
+`/system`/`/vendor`** — no necesariamente porque el driver de storage nunca
+termine de detectar la tarjeta, sino porque el script que decide cómo
+montar las particiones lógicas del `super` intenta leer algún atributo de
+sysfs (posiblemente relacionado a MMC/dynamic-partitions) que se cuelga de
+la misma manera, y todo el arranque queda esperando ahí para siempre.
+
 **Para la próxima sesión:**
-1. Usar el shell de debug ya funcional (con el fix de `/dev/ptmx`, imagen
-   `halium-boot-ptmxfix.img`) para confirmar si `/sys/class/mmc_host/mmc0/
-   mmc0:0001/block` existe (un comando, reflasheando fresco antes), y
-   revisar `dmesg` filtrado por `mmc`/`msdc` (aunque `dmesg` viene fallando
-   sistemáticamente incluso con `grep`/`head` de por medio — probar
-   `dmesg -c` o leer `/proc/kmsg` con `dd` en su lugar si sigue fallando).
-2. Revisar el script `scripts/local` (o el que corresponda) de
-   `initramfs-tools-halium` para ver la lógica de montaje de particiones
-   lógicas dynamic-partitions — aunque dado que ni siquiera existe
-   `/dev/block`, es más probable que el problema esté aguas arriba (en el
-   driver/hardware), no en la lógica de montaje en sí.
-3. Si la limitación de "una interacción por conexión" molesta mucho,
-   investigar si hay alguna forma de que `telnetd` acepte múltiples
-   conexiones secuenciales sin necesitar reflashear cada vez (por ejemplo,
-   envolviendo `telnetd` en un `while :; do ... ; done` en el script, ya
-   que sabemos que sí puede volver a arrancar solo con otro reset).
-3. El fix de VNDK (symlinks + truncar `packages/modules/vndk/apex/
+1. Revisar el código fuente del kernel (`kernel/drivers/mmc/` y
+   `kernel/drivers/usb/gadget/` o donde viva `f_mass_storage`/`android_usb`
+   en este árbol) buscando `.show()`/attribute callbacks que puedan quedar
+   esperando un mutex/completion que nunca se libera — es un bug de kernel
+   real, no algo arreglable solo desde el ramdisk.
+2. Confirmar la hipótesis de forma más controlada: usar el canal `iSerial`
+   (el único 100% confiable) para reportar, **uno por uno y con mucho
+   cuidado de no encadenar más de un `usb_info()` de diagnóstico por
+   boot** (encadenar varios provoca re-enumeraciones USB que desestabilizan
+   la sesión, ya visto antes), exactamente cuál lectura específica es la
+   que cuelga — separar bien `f_mass_storage/lun/file` de
+   `$ANDROID_USB/functions` de `$ANDROID_USB/enable` en intentos
+   independientes.
+3. Si se confirma que es un bug de kernel en una ruta de código que el
+   propio `mountroot` de Halium también dispara, la solución probablemente
+   pase por parchear ese driver/atributo específico (evitar el `.show()`
+   problemático, o bindear el atributo de otra forma) en vez de seguir
+   iterando desde el ramdisk.
+4. El tooling en `debug-initramfs/` (script de pánico parcheado,
+   `make_halium_boot.py`, `build.sh`, cliente `hdbg`) queda versionado y
+   listo para seguir iterando sin depender del scratchpad. El canal HTTP
+   quedó armado pero **no es fiable para contenido real** por el mismo bug
+   de fork — solo sirve para respuestas chicas hardcodeadas, así que en la
+   práctica seguimos dependiendo del canal `iSerial` (una línea, un dato
+   por vez) hasta resolver el bug de fondo.
+5. El fix de VNDK (symlinks + truncar `packages/modules/vndk/apex/
    Android.bp` a solo `current`+`v31` + mover v28/v29/v30 fuera del árbol +
    placeholders puntuales bajo `out/`) sigue siendo reutilizable si se
-   retoma `hybris-recovery` más adelante, aunque dejó de ser prioritario
-   ahora que el debug telnet funciona.
-4. El local_manifest quedó con un `<remove-project>` que rompe `repo sync`
+   retoma `hybris-recovery` más adelante.
+6. El local_manifest quedó con un `<remove-project>` que rompe `repo sync`
    sin argumentos (tira el mismo error de "non-existent project") — si se
    necesita volver a correr `repo sync` completo en esa PC, revisar/sacar
    esa línea de `.repo/local_manifests/device.xml` primero.

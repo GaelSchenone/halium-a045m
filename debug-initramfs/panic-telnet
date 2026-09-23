@@ -1,0 +1,275 @@
+#!/bin/sh
+#
+# Halium debug panic hook, patched for the Samsung Galaxy A04 (SM-A045M)
+# port. Based on the upstream initramfs-tools-halium scripts/panic/telnet,
+# with two fixes plus a new debug channel:
+#
+#   1. /dev/ptmx is missing on this device (even though /dev/pts/ptmx, the
+#      devpts multiplexer, exists) — without it nothing can allocate a
+#      pty, so telnetd used to accept a connection and never attach a
+#      shell. Fixed with a plain symlink.
+#   2. telnetd (BusyBox 1.22.1) is run with -F so it backgrounds via the
+#      shell instead of its own (here unreliable) self-daemonization.
+#   3. An HTTP/CGI debug channel (busybox httpd) is added as the primary
+#      way to run commands and read output. An interactive telnet/pty
+#      session on this device is extremely fragile once a command touches
+#      certain sysfs paths (ash's line editor also sends cursor-position
+#      escape sequences a raw socket client never answers) — every
+#      connection tends to die mid-command, and it gets worse with every
+#      connection reused on the same boot. HTTP has no pty, no line
+#      editing, no protocol negotiation, and busybox httpd forks a fresh
+#      process per request, so one hung command can't take the others
+#      down with it.
+#
+# This only ever runs from a debug boot.img built for this repo's own
+# investigation; it is never part of a real Halium image. It intentionally
+# exposes an unauthenticated root shell over HTTP, on the isolated
+# 192.168.2.0/24 link that only exists over the USB cable while this
+# debug ramdisk is active.
+
+PREREQ=""
+prereqs() {
+	echo "$PREREQ"
+}
+case $1 in
+# get pre-requisites
+prereqs)
+	prereqs
+	exit 0
+	;;
+esac
+
+USB_FUNCTIONS=rndis,mass_storage
+ANDROID_USB=/sys/class/android_usb/android0
+GADGET_DIR=/config/usb_gadget
+LOCAL_IP=192.168.2.15
+EXPLICIT_BUSYBOX="/bin/busybox"
+TELNET_DEBUG_PORT=23
+WWW_DIR=/tmp/www
+DIAG_FILE=/tmp/diag.img
+
+write() {
+	echo -n "$2" >"$1"
+}
+
+# This sets up the USB with whatever USB_FUNCTIONS are set to via configfs
+usb_setup_configfs() {
+    G_USB_ISERIAL=$GADGET_DIR/g1/strings/0x409/serialnumber
+
+    mkdir $GADGET_DIR/g1
+    write $GADGET_DIR/g1/idVendor                   "0x18D1"
+    write $GADGET_DIR/g1/idProduct                  "0xD001"
+    mkdir $GADGET_DIR/g1/strings/0x409
+    write $GADGET_DIR/g1/strings/0x409/serialnumber "$1"
+    write $GADGET_DIR/g1/strings/0x409/manufacturer "Halium initrd"
+    write $GADGET_DIR/g1/strings/0x409/product      "Failed to boot"
+
+    if echo $USB_FUNCTIONS | grep -q "rndis"; then
+        mkdir $GADGET_DIR/g1/functions/rndis.usb0
+        mkdir $GADGET_DIR/g1/functions/rndis_bam.rndis
+    fi
+    if echo $USB_FUNCTIONS | grep -q "mass_storage"; then
+        mkdir $GADGET_DIR/g1/functions/storage.0
+        mkdir $GADGET_DIR/g1/functions/storage.0/lun.0 2>/dev/null
+        write $GADGET_DIR/g1/functions/storage.0/lun.0/file "$DIAG_FILE"
+    fi
+
+    mkdir $GADGET_DIR/g1/configs/c.1
+    mkdir $GADGET_DIR/g1/configs/c.1/strings/0x409
+    write $GADGET_DIR/g1/configs/c.1/strings/0x409/configuration "$USB_FUNCTIONS"
+
+    if echo $USB_FUNCTIONS | grep -q "rndis"; then
+        ln -s $GADGET_DIR/g1/functions/rndis.usb0 $GADGET_DIR/g1/configs/c.1
+        ln -s $GADGET_DIR/g1/functions/rndis_bam.rndis $GADGET_DIR/g1/configs/c.1
+    fi
+    echo $USB_FUNCTIONS | grep -q "mass_storage" && ln -s $GADGET_DIR/g1/functions/storage.0 $GADGET_DIR/g1/configs/c.1
+
+    echo "$(ls /sys/class/udc)" > $GADGET_DIR/g1/UDC
+}
+
+# This sets up the USB with whatever USB_FUNCTIONS are set to via android_usb
+usb_setup_android_usb() {
+    G_USB_ISERIAL=$ANDROID_USB/iSerial
+    write $ANDROID_USB/enable          0
+    write $ANDROID_USB/functions       ""
+    write $ANDROID_USB/enable          1
+    usleep 500000 # 0.5 delay to attempt to remove rndis function
+    write $ANDROID_USB/enable          0
+    write $ANDROID_USB/idVendor        18D1
+    write $ANDROID_USB/idProduct       D001
+    write $ANDROID_USB/iManufacturer   "Halium initrd"
+    write $ANDROID_USB/iProduct        "Failed to boot"
+    write $ANDROID_USB/iSerial         "$1"
+    write $ANDROID_USB/functions       $USB_FUNCTIONS
+    write $ANDROID_USB/enable          1
+    usleep 200000
+    if [ -e /sys/class/android_usb/android0/f_mass_storage/lun/file ]; then
+        write /sys/class/android_usb/android0/f_mass_storage/lun/file "$DIAG_FILE"
+    fi
+}
+
+# This determines which USB setup method is going to be used
+usb_setup() {
+    mkdir /config || true
+    mount -t configfs none /config || true
+
+    if [ -d $ANDROID_USB ]; then
+        usb_setup_android_usb $1
+    elif [ -d $GADGET_DIR ]; then
+        usb_setup_configfs $1
+    fi
+}
+
+usb_info() {
+    # make sure USB is settled
+    echo "########################## usb_info: $1"
+    sleep 1
+    write $G_USB_ISERIAL "$1"
+}
+
+inject_loop() {
+	INJ_DIR=/init-ctl
+	INJ_STDIN=$INJ_DIR/stdin
+
+	mkdir $INJ_DIR
+	mkfifo $INJ_STDIN
+	echo "This entire directory is for debugging init - it can safely be removed" >$INJ_DIR/README
+
+	echo "########################## Beginning inject loop"
+	while :; do
+		while read IN; do
+			if [ "$IN" = "continue" ]; then break 2; fi
+			$IN
+		done <$INJ_STDIN
+	done
+	rm -rf $INJ_DIR # Clean up if we exited nicely
+	echo "########################## inject loop done"
+}
+
+# Placeholder backing file for the mass_storage LUN. Must exist before
+# usb_setup binds the gadget; real diagnostic content gets dd'd into it
+# (notrunc, same size) further down, once collected, so the exported
+# block device's size never changes while a host might already have it
+# mounted/open.
+dd if=/dev/zero of=$DIAG_FILE bs=1M count=8 2>/dev/null
+
+usb_setup "halium-initrd telnet 192.168.2.15"
+
+USB_IFACE=notfound
+/sbin/ifconfig rndis0 $LOCAL_IP && USB_IFACE=rndis0
+if [ x$USB_IFACE = xnotfound ]; then
+	/sbin/ifconfig usb0 $LOCAL_IP && USB_IFACE=usb0
+fi
+# Report for the logs
+/sbin/ifconfig -a
+
+# Unable to set up USB interface? Reboot.
+if [ x$USB_IFACE = xnotfound ]; then
+	usb_info "Halium initrd Debug: ERROR: could not setup USB as usb0 or rndis0"
+	dmesg
+	sleep 60 # plenty long enough to check usb on host
+	reboot -f
+fi
+
+# Create /etc/udhcpd.conf file.
+echo "start 192.168.2.20" >/etc/udhcpd.conf
+echo "end 192.168.2.90" >>/etc/udhcpd.conf
+echo "lease_file /var/udhcpd.leases" >>/etc/udhcpd.conf
+echo "interface $USB_IFACE" >>/etc/udhcpd.conf
+echo "option subnet 255.255.255.0" >>/etc/udhcpd.conf
+
+# Be explicit about busybox so this works in a rootfs too
+echo "########################## starting dhcpd"
+$EXPLICIT_BUSYBOX udhcpd
+
+ps -wlT
+ps -ef
+netstat -lnp
+cat /proc/mounts
+sync
+
+# /dev/ptmx is missing on this device even though /dev/pts/ptmx exists;
+# without it, telnetd (and anything else needing a pty) cannot allocate
+# one, causing the connection to accept and then never attach a shell.
+[ -e /dev/ptmx ] || ln -s pts/ptmx /dev/ptmx
+
+# --- Static diagnostic dump, served over HTTP, no shell needed at all ---
+mkdir -p $WWW_DIR/cgi-bin
+echo "http debug channel is alive" >$WWW_DIR/tiny.txt
+{
+	echo "=== uname -a ==="
+	uname -a
+	echo "=== /proc/cmdline ==="
+	cat /proc/cmdline
+	echo "=== /proc/mounts ==="
+	cat /proc/mounts
+	echo "=== /proc/partitions ==="
+	cat /proc/partitions
+	echo "=== /proc/devices ==="
+	cat /proc/devices
+	echo "=== ls -la /dev ==="
+	ls -la /dev
+	echo "=== ls -la /dev/block ==="
+	ls -la /dev/block
+	echo "=== ls -la /sys/block ==="
+	ls -la /sys/block
+	echo "=== ps -ef ==="
+	ps -ef
+} >$WWW_DIR/diag.txt 2>&1
+sync
+# mmc_host/mmc drivers reads are done separately, backgrounded, and
+# capped hard: a stuck (D-state) read here must never hold open the fd
+# for diag.txt above, since a writer process with that fd still open
+# blocks any reader (httpd included) from ever seeing EOF.
+( timeout -t 5 ls -laR /sys/class/mmc_host >$WWW_DIR/mmc_host.txt 2>&1
+  timeout -t 5 ls -laR /sys/bus/mmc/drivers >>$WWW_DIR/mmc_host.txt 2>&1
+  sync
+  # Re-publish the mass_storage dump now that mmc_host.txt is ready too.
+  cat $WWW_DIR/diag.txt $WWW_DIR/mmc_host.txt $WWW_DIR/dmesg.txt 2>/dev/null \
+    | dd of=$DIAG_FILE bs=1M conv=notrunc,nocreat 2>/dev/null
+  sync ) &
+timeout -t 15 dmesg >$WWW_DIR/dmesg.txt 2>&1
+sync
+
+# --- Also copy diag.txt + dmesg.txt into the mass_storage backing file,
+# as a plain-text dump the host can read with dd/strings straight off the
+# exposed block device. This is the reliable channel: serving real file
+# content or running commands over the network here needs the debug
+# ramdisk to fork() a worker for the transfer, and that fork'd child never
+# manages to read/write through the inherited USB-gadget-network socket on
+# this device — every telnetd/httpd session that touches real content
+# hangs forever, while responses the parent process builds directly (a
+# fixed 404 page, the USB iSerial string) go through instantly. Mass
+# storage sidesteps this completely: the kernel serves the backing file
+# over USB itself, no userspace process (forked or not) in the loop.
+cat $WWW_DIR/diag.txt $WWW_DIR/dmesg.txt 2>/dev/null | dd of=$DIAG_FILE bs=1M conv=notrunc,nocreat 2>/dev/null
+sync
+
+# --- CGI: POST a shell command, get its output back, one process per
+# request so a stuck command can't wedge the whole debug session. ---
+cat >$WWW_DIR/cgi-bin/run <<'CGIEOF'
+#!/bin/sh
+echo "Content-Type: text/plain"
+echo
+CMD=$(dd bs=1 count="${CONTENT_LENGTH:-0}" 2>/dev/null)
+timeout -t 20 /bin/sh -c "$CMD" 2>&1
+CGIEOF
+chmod +x $WWW_DIR/cgi-bin/run
+
+echo "########################## starting httpd"
+$EXPLICIT_BUSYBOX httpd -f -p ${LOCAL_IP}:80 -h $WWW_DIR &
+
+# Non-blocking telnetd (kept as a secondary/manual channel)
+echo "########################## starting telnetd"
+# We run telnetd on different ports pre/post-switch_root This
+# avoids problems with an unterminated pre-switch_root telnetd
+# hogging the port
+$EXPLICIT_BUSYBOX telnetd -F -b ${LOCAL_IP}:${TELNET_DEBUG_PORT} -l /bin/sh &
+
+# For some reason this does not work in rootfs
+usb_info "Halium initrd Debug: http://$LOCAL_IP/diag.txt telnet on port $TELNET_DEBUG_PORT on $USB_IFACE $LOCAL_IP - also running udhcpd"
+
+usb_info "DIAG fms=$([ -d /sys/class/android_usb/android0/f_mass_storage ] && echo yes || echo no) lun=$(cat /sys/class/android_usb/android0/f_mass_storage/lun/file 2>&1 | tr '\n' ';' | cut -c1-40) funcs=$(cat $ANDROID_USB/functions 2>&1 | cut -c1-40) en=$(cat $ANDROID_USB/enable 2>&1)"
+
+# Run command injection loop = can be exited via 'continue'
+inject_loop
