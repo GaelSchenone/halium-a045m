@@ -39,7 +39,7 @@ prereqs)
 	;;
 esac
 
-USB_FUNCTIONS=rndis,mass_storage
+USB_FUNCTIONS=rndis
 ANDROID_USB=/sys/class/android_usb/android0
 GADGET_DIR=/config/usb_gadget
 LOCAL_IP=192.168.2.15
@@ -269,7 +269,12 @@ $EXPLICIT_BUSYBOX telnetd -F -b ${LOCAL_IP}:${TELNET_DEBUG_PORT} -l /bin/sh &
 # For some reason this does not work in rootfs
 usb_info "Halium initrd Debug: http://$LOCAL_IP/diag.txt telnet on port $TELNET_DEBUG_PORT on $USB_IFACE $LOCAL_IP - also running udhcpd"
 
-usb_info "DIAG fms=$([ -d /sys/class/android_usb/android0/f_mass_storage ] && echo yes || echo no) lun=$(cat /sys/class/android_usb/android0/f_mass_storage/lun/file 2>&1 | tr '\n' ';' | cut -c1-40) funcs=$(cat $ANDROID_USB/functions 2>&1 | cut -c1-40) en=$(cat $ANDROID_USB/enable 2>&1)"
+# Find any process stuck in uninterruptible sleep (D state) — /proc/*/stat
+# field 3 is the state char, field 2 is (comm). This never touches the
+# specific device sysfs path that seems to hang, so it should always be
+# safe to read regardless of what's stuck.
+DSTATE=$(for s in /proc/[0-9]*/stat; do read -r p c st rest <"$s" 2>/dev/null; [ "$st" = "D" ] && echo -n "$p$c,"; done)
+usb_info "DIAG dstate=${DSTATE:-none}"
 
 # Run command injection loop = can be exited via 'continue'
 inject_loop

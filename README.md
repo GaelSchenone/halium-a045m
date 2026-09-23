@@ -87,8 +87,24 @@ of hang was independently observed reading certain sysfs attributes (under
 freezing `/init` (PID 1) itself mid-read. This looks like a real kernel bug
 — some sysfs `.show()` callback blocking forever in uninterruptible sleep —
 and is now the leading suspect for why Halium's own mount script never gets
-past discovering `/system`/`/vendor` in the first place. See PORTING.md for
-the full investigation and the plan to pin it down further.
+past discovering `/system`/`/vendor` in the first place.
+
+Two more isolated tests ruled out the remaining alternative explanations.
+Capturing a `sysrq` task-state dump into pstore across a reboot turned out
+to be a dead end regardless of timing or technique: Samsung's own reboot
+handler unconditionally overwrites the pstore console buffer with a fixed
+message on every reboot. And re-testing the telnet/HTTP channels on a fresh
+boot, with `dmesg` as the sole first command over telnet and with the HTTP
+diagnostic file already fully written to disk beforehand, confirmed neither
+failure is about command choice, timing, or connection reuse: telnet's
+shell echo cuts off at an unpredictable byte offset each time (consistent
+with BusyBox `ash`'s line editor getting stuck after an unanswered cursor-
+position query), while HTTP serves perfect headers — including the correct
+`Content-Length` for a file that already existed — but never delivers any
+body bytes. Both debug channels are unusable for bulk data for reasons
+unrelated to the underlying sysfs-hang bug; only the single-line `iSerial`
+channel remains reliable. See PORTING.md for the full investigation and the
+plan to pin the root cause down further.
 
 See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
 detailed log of every issue found and fixed so far.

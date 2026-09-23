@@ -815,6 +815,52 @@ montar las particiones lógicas del `super` intenta leer algún atributo de
 sysfs (posiblemente relacionado a MMC/dynamic-partitions) que se cuelga de
 la misma manera, y todo el arranque queda esperando ahí para siempre.
 
+**Sesión siguiente (2026-09-23): se descarta el reintento de `telnetd`/`httpd`
+tal como estaban, con dos pruebas aisladas nuevas.** Primero se probó el
+camino `sysrq` (`echo w > /proc/sysrq-trigger` para volcar el stack de tareas
+en estado D al buffer de pstore, seguido de un reboot controlado para leerlo
+después). Resultado: **negativo, y definitivo** — el handler de reboot propio
+de Samsung (`sec_reboot`, en `drivers/samsung/sec_hard_reset_hook.c` y
+código relacionado) pisa incondicionalmente la región `console-ramoops-0` de
+pstore con un mensaje fijo de 10 líneas (`sec_reboot (0, (null))`,
+`context saved(CPU:N)` por cada CPU, etc.) en **todo** reboot, sin importar
+la causa o el timing — probado con tres variantes (reset físico, `reboot -f`
+inmediato, `reboot -f` con `sleep 3; sync` antes). pstore queda descartado
+como canal de diagnóstico en este dispositivo para cualquier dato que
+dependa de sobrevivir a un reboot posterior.
+
+Con eso descartado, se retomó el plan original de esta sesión (canal
+HTTP/CGI) revirtiendo el experimento de sysrq del script de pánico y
+corriendo una prueba controlada, aislada, con una imagen recién flasheada:
+- **Telnet, `dmesg` como primer y único comando de una conexión nueva:** el
+  eco de la propia línea de comando (`dmesg\r\n`, 7 bytes) llega completo,
+  pero después no llega **nada** más durante 30s. En una segunda conexión
+  del mismo boot, con `echo hi_control_test` como control, el corte pasó a
+  mitad del eco (10 de 21 bytes) — es decir, el punto de corte **varía entre
+  intentos**, no es específico de `dmesg` ni depende de si es la primera
+  conexión o no. Esto confirma la hipótesis original del plan (la que
+  motivó construir el canal HTTP en primer lugar): el line editor de
+  BusyBox `ash` manda `ESC[6n` (petición de posición del cursor) y, como
+  nuestro cliente no es una terminal real y nunca responde eso, el editor
+  de línea queda en un estado indefinido que corta el eco en un punto
+  aleatorio — no es degradación por reuso de conexión ni un bug de
+  `dmesg` específicamente.
+- **HTTP, `diag.txt` ya generado y escrito a disco *antes* de la conexión**
+  (para descartar cualquier problema de timing/generación): los headers
+  llegan perfectos, incluyendo `Content-Length: 23127` (el tamaño real y
+  correcto del archivo) — pero **0 de 23127 bytes del cuerpo** llegan en 15s.
+  Confirma, de forma aún más limpia que la vez anterior, que el problema no
+  es de timing ni de que el archivo no estuviera listo: es estructural, en
+  cómo el proceso hijo forkeado escribe contenido real al socket heredado.
+
+**Conclusión de esta rama de investigación:** los dos únicos canales de
+debug disponibles (telnet interactivo y HTTP/CGI) están rotos por razones
+independientes entre sí, y ninguno de los dos es arreglable con cambios en
+el script de pánico — son bugs de más abajo (line-editing/pty por un lado,
+fork+socket por el otro). El canal `iSerial` (`usb_info()`, escritura directa
+del proceso padre) sigue siendo el único 100% confiable, pero limitado a
+~120 caracteres y a una sola llamada por boot sin desestabilizar el USB.
+
 **Para la próxima sesión:**
 1. Revisar el código fuente del kernel (`kernel/drivers/mmc/` y
    `kernel/drivers/usb/gadget/` o donde viva `f_mass_storage`/`android_usb`
@@ -834,6 +880,16 @@ la misma manera, y todo el arranque queda esperando ahí para siempre.
    pase por parchear ese driver/atributo específico (evitar el `.show()`
    problemático, o bindear el atributo de otra forma) en vez de seguir
    iterando desde el ramdisk.
+3bis. Dado que ni telnet ni HTTP sirven para sacar contenido real (ver
+   arriba, sesión 2026-09-23) y que pstore tampoco es viable (`sec_reboot`
+   pisa el buffer en todo reboot), la única vía de extracción que probó ser
+   100% confiable es `iSerial`/`usb_info()` — una llamada por boot, ~120
+   caracteres. Vale la pena probar volcar ahí un `dmesg | grep -iE
+   "mmc|msdc|f_mass_storage|android_usb"` (filtrado para que entre en el
+   límite de caracteres) en vez de intentar leer sysfs en vivo — si el hang
+   es específico de ciertos atributos y no de `dmesg` en sí, un grep
+   acotado debería traer las líneas relevantes sin tocar el atributo que
+   cuelga.
 4. El tooling en `debug-initramfs/` (script de pánico parcheado,
    `make_halium_boot.py`, `build.sh`, cliente `hdbg`) queda versionado y
    listo para seguir iterando sin depender del scratchpad. El canal HTTP
