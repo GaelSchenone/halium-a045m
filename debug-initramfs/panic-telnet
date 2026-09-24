@@ -288,5 +288,27 @@ usb_info "Halium initrd Debug: http://$LOCAL_IP/diag.txt telnet on port $TELNET_
 HUNG=$(grep "blocked for more than" $WWW_DIR/dmesg.txt 2>/dev/null | tr '\n' '|' | cut -c1-100)
 usb_info "HUNG_TASKS: ${HUNG:-NONE}"
 
+# CONFIG_RCU_CPU_STALL_TIMEOUT=21 is already enabled (< the 30s hung-task
+# threshold), so if this is an RCU stall, it should already have printed
+# by the time of the EARLY dmesg.txt capture above (proven safe — never
+# hangs). Grep that, no live read of anything.
+RCU=$(grep -iE "rcu_sched|rcu_preempt|RCU stall|self-detected stall" $WWW_DIR/dmesg.txt 2>/dev/null | tr '\n' '|' | cut -c1-100)
+usb_info "RCU_STALL: ${RCU:-NONE}"
+
+# pstore mounts and lists instantly (proven safe — this part never hung):
+# ramoops.console_size registers its own kernel console sink, independent
+# of dmesg's klogctl()/syslog() path. Left mounted here for the record, but
+# do NOT read/tail any pstore file after this point in the boot timeline —
+# already tested (2026-09-23): reading console-ramoops-0 ~35s+ into boot
+# hangs forever too, exactly like the second dmesg call, unkillable even
+# under `timeout`. Whatever this bug is, it isn't specific to one logging
+# mechanism; see PORTING.md for the current theory (RCU/global lock/CPU
+# stall) and the next planned experiment (poll something cheap every ~5s
+# from script start to catch the exact transition, instead of sleep+read).
+mkdir -p /sys/fs/pstore
+MOUNT_OUT=$(mount -t pstore pstore /sys/fs/pstore 2>&1)
+PSTORE_LS=$(ls /sys/fs/pstore 2>&1 | tr '\n' ',' | cut -c1-80)
+usb_info "PSTORE_LS: ${PSTORE_LS:-EMPTY} mnt=${MOUNT_OUT:-ok}"
+
 # Run command injection loop = can be exited via 'continue'
 inject_loop

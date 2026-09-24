@@ -924,6 +924,51 @@ cualquier lectura posterior de `dmesg` — exactamente la classe de bug que
 explicaría por qué nunca pudimos diagnosticarlo bien hasta ahora (el
 propio mecanismo de diagnóstico se rompe con el tiempo).
 
+**Sesión siguiente (2026-09-23, tercera vuelta): se descarta que sea
+específico de `dmesg`/`klogctl()`.** Se agregó al script un experimento
+para leer `pstore` en vivo, sin reboot: `mount -t pstore pstore
+/sys/fs/pstore` (funciona, expone `console-ramoops-0` y `pmsg-ramoops-0`
+casi instantáneamente tras levantar la interfaz de red) y, tras el mismo
+`sleep 35` de antes, un `timeout -t 15 tail -c 300 console-ramoops-0`.
+**El mismo patrón exacto se repitió: nunca llegó el resultado**, ni
+siquiera pasados más de 2 minutos de espera (muy por encima del
+`timeout -t 15`) — otra vez un cuelgue genuino, no lectura lenta.
+
+Esto es un dato clave: `dmesg` (vía `klogctl()`/`syslog()`) y leer un
+archivo de `pstore` son mecanismos de kernel **completamente distintos**
+que no comparten código de lectura entre sí — que AMBOS se cuelguen de la
+misma forma, en la misma ventana de tiempo, descarta que el bug esté en
+el mecanismo de logging/consola en particular. Apunta a algo más
+sistémico: un lock global (ej. relacionado a RCU — `synchronize_rcu()`
+nunca completando porque algún núcleo quedó en una sección no-preemptible
+para siempre), o un CPU/core que deja de responder del todo pasados esos
+~30-40s. Lo que SÍ sigue funcionando sin problema en ese mismo momento:
+`httpd` sirviendo un 404 hardcodeado (una respuesta generada enteramente
+por el proceso padre, sin ningún syscall "especial" de por medio) — es
+decir, no es que TODO el sistema se congele; es específicamente cualquier
+operación que dependa de esa sección/lock trabada.
+
+**Sesión siguiente (2026-09-24): se saca el experimento de pstore tardío
+(ya confirmado que cuelga, sin valor en repetirlo) y se agrega un grep de
+RCU stall sobre el `dmesg.txt` temprano** (`CONFIG_RCU_CPU_STALL_TIMEOUT=21`
+ya estaba habilitado en el defconfig, con un umbral más bajo que los 30s
+del hung-task detector — si hubiera un stall real, ya debería estar
+impreso para cuando se captura ese archivo). El script terminó completo
+sin colgarse por primera vez desde que se agregó el detector de hung-task
+— buena señal de que ya no queda ningún paso riesgoso en el flujo normal.
+Dato perdido por un error de procedimiento propio: el polling de `iSerial`
+se hizo recién al final, y como ese descriptor solo guarda la ÚLTIMA
+escritura, se pisaron los resultados de `HUNG_TASKS` y `RCU_STALL` con el
+de `PSTORE_LS` (que corre después) — quedó sin leer si hubo o no señal de
+RCU stall. Lo único que se alcanzó a ver fue `PSTORE_LS: EMPTY` (a
+diferencia del intento anterior, que sí mostró `console-ramoops-0`) — la
+explicación más probable es que el reboot intermedio (recuperación a
+Android) pasó por el handler `sec_reboot` de Samsung, que ya sabemos que
+corrompe esa región, invalidando el registro para que `pstore` no lo
+exponga en el boot siguiente. **Para la próxima sesión: pollear `iSerial`
+bien seguido desde el arranque (cada 2-3s) para no perder los resultados
+intermedios, no solo al final.**
+
 **Para la próxima sesión:**
 1. Revisar el código fuente del kernel (`kernel/drivers/mmc/` y
    `kernel/drivers/usb/gadget/` o donde viva `f_mass_storage`/`android_usb`
@@ -943,23 +988,29 @@ propio mecanismo de diagnóstico se rompe con el tiempo).
    pase por parchear ese driver/atributo específico (evitar el `.show()`
    problemático, o bindear el atributo de otra forma) en vez de seguir
    iterando desde el ramdisk.
-3bis. **Actualizado:** el grep de `dmesg` por `iSerial` sí funciona (ver
-   arriba) — confirmó que `mmcblk0` particiona bien. El límite real ahora
-   no es el canal de transporte sino que **`dmesg` en sí se cuelga sin
-   remedio pasados ~30-40s de boot**. Probar en la próxima sesión: montar
-   `pstore` en vivo dentro del propio script de pánico
-   (`mount -t pstore pstore /sys/fs/pstore`, sin necesidad de ningún
-   reboot) y leer directamente `/sys/fs/pstore/console-ramoops-0` (o el
-   nombre que tenga) en vez de invocar `dmesg`/dmesg` una segunda vez — el
-   backend `ramoops.console_size` registra su propia consola de kernel
-   independiente del `console=` del cmdline, así que debería estar
-   acumulando *todo* el log (incluido lo que reporte
-   `CONFIG_DETECT_HUNG_TASK`) desde el arranque, sin pasar por el
-   mecanismo de `dmesg`/`klogctl()` que es el que se traba. Si ESTA
-   lectura también se cuelga, apunta a que el bug está en el propio
-   consumidor de consola (posiblemente el driver de `ramoops` mismo), no
-   en `klogctl()`; si no se cuelga, es la vía de extracción que nos
-   faltaba.
+3bis. **Actualizado dos veces:** el grep de `dmesg` por `iSerial` sí
+   funciona (confirmó que `mmcblk0` particiona bien), pero tanto `dmesg`
+   como leer `pstore` en vivo (`mount -t pstore pstore /sys/fs/pstore` +
+   `tail` de `console-ramoops-0`) se cuelgan igual pasados ~30-40s de
+   boot — no es un bug del mecanismo de logging en particular. Ideas para
+   la próxima sesión, en orden de costo creciente:
+   - Revisar si `CONFIG_RCU_CPU_STALL_INFO` (o el detector de stalls de
+     RCU que corresponda a esta versión) ya está habilitado en el
+     defconfig; si lo está, un stall real ya debería estar reportado en
+     el `dmesg.txt` **temprano** (el que sí se captura bien) — grepear por
+     "rcu_sched\|RCU\|stall" ahí en vez de intentar leer nada tarde.
+   - En vez de "esperar y leer" (siempre se cuelga), cambiar a "leer
+     seguido y rápido hasta que falle": un loop desde el arranque del
+     script, cada ~5s, con algo bien barato envuelto en `timeout -t 3`
+     (ej. `cat /proc/loadavg` o `cat /proc/stat`), guardando cada
+     resultado con su índice de iteración — así se captura el ÚLTIMO
+     valor bueno justo antes de que empiece a fallar, en vez de intentar
+     adivinar cuánto esperar.
+   - Dato a favor de que no es un freeze total: `httpd` sirviendo un 404
+     hardcodeado (respuesta generada enteramente por el proceso padre)
+     sigue funcionando sin problema en el mismo momento en que `dmesg`/
+     `pstore` ya están colgados — es una sección/lock específica, no todo
+     el sistema.
 4. El tooling en `debug-initramfs/` (script de pánico parcheado,
    `make_halium_boot.py`, `build.sh`, cliente `hdbg`) queda versionado y
    listo para seguir iterando sin depender del scratchpad. El canal HTTP
