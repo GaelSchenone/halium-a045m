@@ -861,6 +861,69 @@ fork+socket por el otro). El canal `iSerial` (`usb_info()`, escritura directa
 del proceso padre) sigue siendo el único 100% confiable, pero limitado a
 ~120 caracteres y a una sola llamada por boot sin desestabilizar el USB.
 
+**Sesión siguiente (2026-09-23, segunda mitad): se implementa el plan del
+grep por `iSerial` y aparece un hallazgo mucho más grande de lo esperado.**
+
+Primer resultado, con el script ya reconstruido para mandar
+`dmesg | grep -iE "mmc|msdc"` (recortado a 100 caracteres) por `usb_info()`:
+apareció `mmcblk0: p1 p2 p3 ... p16` — **el kernel sí detecta `mmcblk0` con
+sus 16 particiones a los 0.87s de boot**, sin ningún síntoma de cuelgue en
+el propio `mmc_blk_probe()`. Esto contradice la sospecha de sesiones
+anteriores ("card detectada pero sin `/dev/mmcblk0`") y abre la posibilidad
+de que el hang de lecturas sysfs que veníamos viendo sea un efecto
+secundario de que **nosotros mismos** estuviéramos tocando ese atributo
+puntual desde el ramdisk, no algo que el propio `mountroot` de Halium
+dispare en su flujo normal.
+
+Para profundizar, se habilitó `CONFIG_DETECT_HUNG_TASK=y` (umbral bajado a
+30s vía `CONFIG_DEFAULT_HUNG_TASK_TIMEOUT=30`) y `CONFIG_WQ_WATCHDOG=y` en
+`kernel/arch/arm64/configs/a04_defconfig` — el detector de tareas
+trabadas del propio kernel, que vuelca automáticamente a `dmesg` el
+backtrace de cualquier tarea en D-state por más de 30s, sin depender de
+sysrq ni de sobrevivir a un reboot. Al reconstruir el kernel volvió a
+aparecer el bug ya documentado de `init/version.c` (clang detecta una
+instalación de CUDA en esta máquina y contamina el string de versión); se
+recreó el wrapper (`tools/clang-wrapper`, gitignored pero persistente en
+disco, invocar con `build/build.sh CC=$(pwd)/tools/clang-wrapper`) que
+filtra esa línea de `clang -v` antes de que `scripts/mkcompile_h` la vea.
+
+Con el detector activo, **una segunda llamada a `dmesg` hecha ~35s después
+del arranque del script de pánico se cuelga para siempre — ni siquiera
+`timeout` la puede matar** (varios minutos de espera, sin resultado, con
+`timeout -t 20` de por medio). Esto es una señal fuerte de D-state genuino
+a nivel de kernel, no una lentitud de userspace: si fuera solo lento,
+`timeout` la habría terminado con SIGKILL igual. La *primera* llamada a
+`dmesg`, hecha temprano en el script (antes de que pasen esos ~30s), sigue
+funcionando siempre sin problema, y en ambos intentos leyó
+`HUNG_TASKS: NONE` — es decir, para ese momento tan temprano del boot,
+todavía no hay ninguna tarea marcada como bloqueada.
+
+Se probó una hipótesis concreta para explicarlo: el cmdline llevaba
+`console=tty0` (consola por framebuffer) desde el principio de esta
+investigación, y en esta etapa del bring-up **no hay driver de display
+funcional** — la teoría era que algo queda trabado a mitad de un
+`printk()` intentando escribir a esa consola rota, y que cualquier lectura
+posterior de `dmesg` (que también necesita esa lock) se cuelga por lo
+mismo. Se sacó `console=tty0` por completo del cmdline (solo quedan los
+parámetros de `ramoops`) y se repitió la prueba exacta: **el mismo cuelgue
+ocurrió igual**, sin ninguna mejora. Esto descarta la consola de
+framebuffer como causa — el problema está en otro lado, probablemente en
+el propio mecanismo de `klogctl()`/`syslog()` que usa `dmesg`, o en algo
+que ese mecanismo termina bloqueando contra alrededor de esa misma
+ventana de ~30-40s de cualquier arranque (independiente de Halium/mount:
+podría ser algo tan genérico como un timer, un workqueue periódico, o una
+transición de power management del propio SoC).
+
+**Por qué esto importa tanto:** si algo se traba genéricamente ~30-40s
+después de cualquier boot de este kernel — sin que tengamos que tocar
+sysfs de MMC ni nada relacionado a Halium para provocarlo — es plausible
+que sea la MISMA causa por la que el `mountroot` de Halium nunca termina:
+no un bug puntual de un driver de storage, sino algo más basal del kernel
+que se traba solo, por tiempo, y que de paso también deja inutilizable
+cualquier lectura posterior de `dmesg` — exactamente la classe de bug que
+explicaría por qué nunca pudimos diagnosticarlo bien hasta ahora (el
+propio mecanismo de diagnóstico se rompe con el tiempo).
+
 **Para la próxima sesión:**
 1. Revisar el código fuente del kernel (`kernel/drivers/mmc/` y
    `kernel/drivers/usb/gadget/` o donde viva `f_mass_storage`/`android_usb`
@@ -880,16 +943,23 @@ del proceso padre) sigue siendo el único 100% confiable, pero limitado a
    pase por parchear ese driver/atributo específico (evitar el `.show()`
    problemático, o bindear el atributo de otra forma) en vez de seguir
    iterando desde el ramdisk.
-3bis. Dado que ni telnet ni HTTP sirven para sacar contenido real (ver
-   arriba, sesión 2026-09-23) y que pstore tampoco es viable (`sec_reboot`
-   pisa el buffer en todo reboot), la única vía de extracción que probó ser
-   100% confiable es `iSerial`/`usb_info()` — una llamada por boot, ~120
-   caracteres. Vale la pena probar volcar ahí un `dmesg | grep -iE
-   "mmc|msdc|f_mass_storage|android_usb"` (filtrado para que entre en el
-   límite de caracteres) en vez de intentar leer sysfs en vivo — si el hang
-   es específico de ciertos atributos y no de `dmesg` en sí, un grep
-   acotado debería traer las líneas relevantes sin tocar el atributo que
-   cuelga.
+3bis. **Actualizado:** el grep de `dmesg` por `iSerial` sí funciona (ver
+   arriba) — confirmó que `mmcblk0` particiona bien. El límite real ahora
+   no es el canal de transporte sino que **`dmesg` en sí se cuelga sin
+   remedio pasados ~30-40s de boot**. Probar en la próxima sesión: montar
+   `pstore` en vivo dentro del propio script de pánico
+   (`mount -t pstore pstore /sys/fs/pstore`, sin necesidad de ningún
+   reboot) y leer directamente `/sys/fs/pstore/console-ramoops-0` (o el
+   nombre que tenga) en vez de invocar `dmesg`/dmesg` una segunda vez — el
+   backend `ramoops.console_size` registra su propia consola de kernel
+   independiente del `console=` del cmdline, así que debería estar
+   acumulando *todo* el log (incluido lo que reporte
+   `CONFIG_DETECT_HUNG_TASK`) desde el arranque, sin pasar por el
+   mecanismo de `dmesg`/`klogctl()` que es el que se traba. Si ESTA
+   lectura también se cuelga, apunta a que el bug está en el propio
+   consumidor de consola (posiblemente el driver de `ramoops` mismo), no
+   en `klogctl()`; si no se cuelga, es la vía de extracción que nos
+   faltaba.
 4. El tooling en `debug-initramfs/` (script de pánico parcheado,
    `make_halium_boot.py`, `build.sh`, cliente `hdbg`) queda versionado y
    listo para seguir iterando sin depender del scratchpad. El canal HTTP

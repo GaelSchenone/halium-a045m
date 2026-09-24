@@ -269,12 +269,24 @@ $EXPLICIT_BUSYBOX telnetd -F -b ${LOCAL_IP}:${TELNET_DEBUG_PORT} -l /bin/sh &
 # For some reason this does not work in rootfs
 usb_info "Halium initrd Debug: http://$LOCAL_IP/diag.txt telnet on port $TELNET_DEBUG_PORT on $USB_IFACE $LOCAL_IP - also running udhcpd"
 
-# Find any process stuck in uninterruptible sleep (D state) — /proc/*/stat
-# field 3 is the state char, field 2 is (comm). This never touches the
-# specific device sysfs path that seems to hang, so it should always be
-# safe to read regardless of what's stuck.
-DSTATE=$(for s in /proc/[0-9]*/stat; do read -r p c st rest <"$s" 2>/dev/null; [ "$st" = "D" ] && echo -n "$p$c,"; done)
-usb_info "DIAG dstate=${DSTATE:-none}"
+# This kernel now has CONFIG_DETECT_HUNG_TASK=y (30s threshold): khungtaskd
+# runs on its own, independent of anything this script does, and prints
+# "task NAME:PID blocked for more than 30 seconds" straight to dmesg for
+# every task stuck in uninterruptible sleep (D state) — which is exactly
+# what we've been trying to find by hand via sysfs pokes and manual D-state
+# scans. Reads the single early dmesg.txt capture from above; if boot
+# hadn't reached 30s uptime yet by then, this may read NONE.
+#
+# IMPORTANT — do NOT call dmesg a second time anywhere in this script.
+# Tested twice (with and without `console=tty0` in the cmdline, to rule out
+# a stuck framebuffer console — made no difference either way): a dmesg
+# call made ~30-40s+ into boot hangs forever, unkillable even under
+# `timeout` (i.e. genuine kernel-side D-state, not just slow), wedging this
+# entire script and requiring a physical reset to recover. See PORTING.md,
+# "2026-09-23" section, for the full investigation and the pstore-based
+# alternative planned for next time.
+HUNG=$(grep "blocked for more than" $WWW_DIR/dmesg.txt 2>/dev/null | tr '\n' '|' | cut -c1-100)
+usb_info "HUNG_TASKS: ${HUNG:-NONE}"
 
 # Run command injection loop = can be exited via 'continue'
 inject_loop

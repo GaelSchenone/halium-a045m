@@ -103,8 +103,28 @@ position query), while HTTP serves perfect headers — including the correct
 `Content-Length` for a file that already existed — but never delivers any
 body bytes. Both debug channels are unusable for bulk data for reasons
 unrelated to the underlying sysfs-hang bug; only the single-line `iSerial`
-channel remains reliable. See PORTING.md for the full investigation and the
-plan to pin the root cause down further.
+channel remains reliable.
+
+Using that channel to grep the kernel log directly turned up a real
+surprise: `mmcblk0` enumerates its 16 partitions cleanly less than a
+second into boot, with no sign of the block driver itself hanging —
+contradicting the earlier suspicion that MMC probing never completes. To
+dig further, the kernel's own hung-task detector was enabled
+(`CONFIG_DETECT_HUNG_TASK`, 30-second threshold), which surfaced something
+bigger: a *second* `dmesg` call made roughly 35 seconds into boot hangs
+forever and is not even killable via `timeout` — a genuine kernel-side
+uninterruptible-sleep stall, not a slow read. The first call, made early,
+always succeeds. Removing `console=tty0` (the framebuffer console, on a
+device with no working display driver yet) from the kernel command line,
+to test whether something was stuck mid-`printk()` against a broken
+console, made no difference — the same hang recurred identically. This
+points at something more fundamental than any one storage or display
+driver: some kernel-internal lock or mechanism that jams up on essentially
+every boot of this kernel around the 30-40 second mark, independent of
+Halium or mounting at all — and which also happens to make the very tool
+needed to diagnose it (`dmesg`) unusable past that point. See PORTING.md
+for the full investigation and the plan to pin the root cause down
+further.
 
 See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
 detailed log of every issue found and fixed so far.
