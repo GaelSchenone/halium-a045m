@@ -969,6 +969,54 @@ exponga en el boot siguiente. **Para la próxima sesión: pollear `iSerial`
 bien seguido desde el arranque (cada 2-3s) para no perder los resultados
 intermedios, no solo al final.**
 
+**Misma sesión, más tarde: se implementa el polling seguido y aparece el
+hallazgo más grande de toda la investigación.** Se reemplazó el
+"sleep 35 + leer" (que siempre se cuelga, tanto con `dmesg` como con
+`pstore`) por un loop que hace un escaneo de estado D de `/proc/*/stat`
+cada ~4s desde el arranque del script, reportando cada iteración por
+`iSerial`. **El resultado: se cuelga en la primerísima iteración** — no a
+los 30-40s, sino casi inmediatamente. Esto tira por la borda la idea de
+que el problema aparece recién pasado ese umbral: el umbral de 30-40s solo
+reflejaba cuánto tarda el *detector* en reportar algo que ya estaba roto
+desde mucho antes.
+
+Para descartar que fuera un efecto de nuestras propias lecturas de sysfs
+(la sospecha original, desde hace varias sesiones), se deshabilitó por
+completo el bloque que lee `/sys/class/mmc_host` y `/sys/bus/mmc/drivers`
+(el sospechoso original) y se repitió la prueba: **se colgó exactamente
+igual, en el mismo punto.** Esto descarta que sea algo que nosotros
+mismos disparamos tocando sysfs de MMC — el problema es inherente al
+arranque de este kernel/imagen, no un efecto secundario de nuestro propio
+script de diagnóstico.
+
+Para localizarlo con precisión se cambió de "escanear todo `/proc` de una"
+a "ir PID por PID", anunciando por `iSerial` "voy a leer el PID X" antes
+de cada lectura de `/proc/$pid/stat` — así, si esa lectura se cuelga, el
+último mensaje que llegue nombra exactamente cuál PID fue. Resultado de la
+primera pasada: `PID 10 (rcu_preempt)` se leyó bien, en estado `I`
+(idle/sano — nada raro con el hilo de RCU en sí), y el script se colgó
+leyendo el PID **siguiente** en la lista — pero el polling no llegó a
+tiempo para capturar cuál. Se ajustó el script para anunciar el PID
+*antes* de leer su `comm` (no solo antes de leer `stat`, para no perder el
+dato si es el propio `comm` el que cuelga) y se agregó un `sleep 2` extra
+entre PIDs para dar más margen al polling del lado del host. **Sesión
+pausada acá — el celular quedó en el boot de debug (colgado en esta
+prueba), pendiente de recuperar con el reset físico en la próxima
+sesión.**
+
+**Para la próxima sesión (actualizado):**
+1. Recuperar el celular (reset físico → Download Mode → flashear
+   `firmware/boot_rooted2.img` + `firmware/super_stock.img` juntos).
+2. Reflashear `halium-boot-artifacts/halium-boot-httpd.img` (ya construido
+   con la versión de cadencia más lenta del bisect-por-PID) +
+   `firmware/super_halium_raw.img`, y pollear `iSerial` bien seguido
+   (cada ~1s) desde que el ping a 192.168.2.15 responde, para no perder
+   ningún mensaje `TRY pid=N` / `OK pid=N comm=... stat=...`.
+3. El PID que nunca llega a completar su lectura de `stat` (justo después
+   de `rcu_preempt`, PID 10) es el candidato número uno a ser la tarea
+   realmente trabada. Una vez identificado por `comm`, buscar ese driver/
+   subsistema específico en el código del kernel.
+
 **Para la próxima sesión:**
 1. Revisar el código fuente del kernel (`kernel/drivers/mmc/` y
    `kernel/drivers/usb/gadget/` o donde viva `f_mass_storage`/`android_usb`

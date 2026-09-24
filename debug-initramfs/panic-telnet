@@ -217,17 +217,20 @@ echo "http debug channel is alive" >$WWW_DIR/tiny.txt
 	ps -ef
 } >$WWW_DIR/diag.txt 2>&1
 sync
-# mmc_host/mmc drivers reads are done separately, backgrounded, and
-# capped hard: a stuck (D-state) read here must never hold open the fd
-# for diag.txt above, since a writer process with that fd still open
-# blocks any reader (httpd included) from ever seeing EOF.
-( timeout -t 5 ls -laR /sys/class/mmc_host >$WWW_DIR/mmc_host.txt 2>&1
-  timeout -t 5 ls -laR /sys/bus/mmc/drivers >>$WWW_DIR/mmc_host.txt 2>&1
-  sync
-  # Re-publish the mass_storage dump now that mmc_host.txt is ready too.
-  cat $WWW_DIR/diag.txt $WWW_DIR/mmc_host.txt $WWW_DIR/dmesg.txt 2>/dev/null \
-    | dd of=$DIAG_FILE bs=1M conv=notrunc,nocreat 2>/dev/null
-  sync ) &
+# DISABLED for this test (see PORTING.md, 2026-09-24): /sys/class/mmc_host
+# and /sys/bus/mmc/drivers are the original suspects for the D-state hang,
+# going all the way back to the earliest sessions investigating this bug.
+# Testing whether OUR OWN read of them is what triggers the stuck-forever
+# condition seen later in this same boot (the poll-until-failure loop
+# below hung on its very first iteration, doing nothing but a plain
+# /proc/*/stat scan — no dmesg/pstore/mmc_host involved), rather than
+# something inherent to Halium's normal (untouched-by-us) boot flow.
+# ( timeout -t 5 ls -laR /sys/class/mmc_host >$WWW_DIR/mmc_host.txt 2>&1
+#   timeout -t 5 ls -laR /sys/bus/mmc/drivers >>$WWW_DIR/mmc_host.txt 2>&1
+#   sync
+#   cat $WWW_DIR/diag.txt $WWW_DIR/mmc_host.txt $WWW_DIR/dmesg.txt 2>/dev/null \
+#     | dd of=$DIAG_FILE bs=1M conv=notrunc,nocreat 2>/dev/null
+#   sync ) &
 timeout -t 15 dmesg >$WWW_DIR/dmesg.txt 2>&1
 sync
 
@@ -309,6 +312,27 @@ mkdir -p /sys/fs/pstore
 MOUNT_OUT=$(mount -t pstore pstore /sys/fs/pstore 2>&1)
 PSTORE_LS=$(ls /sys/fs/pstore 2>&1 | tr '\n' ',' | cut -c1-80)
 usb_info "PSTORE_LS: ${PSTORE_LS:-EMPTY} mnt=${MOUNT_OUT:-ok}"
+
+# --- Bisect-by-PID experiment (see PORTING.md, 2026-09-24) ---
+# The whole-/proc/*/stat-in-one-go poll loop (previous attempt) hung on
+# its very first iteration, even with the mmc_host/mmc-drivers reads
+# disabled above — so it's not our own sysfs pokes triggering this, and
+# whatever it is happens very early (well before any ~30-40s mark). Go
+# one PID at a time instead: announce "about to read PID X" BEFORE each
+# read, so if that read hangs forever, the LAST message the host ever
+# sees names exactly which PID (and its comm) it got stuck on.
+(
+	PIDS=$(timeout -t 3 sh -c "ls /proc | grep -E '^[0-9]+\$'" 2>&1)
+	usb_info "PIDS: $(echo "$PIDS" | tr '\n' ',' | cut -c1-90)"
+	for pid in $PIDS; do
+		usb_info "TRY pid=$pid"
+		COMM=$(timeout -t 2 cat /proc/$pid/comm 2>&1 | tr -d '\n' | cut -c1-20)
+		STAT=$(timeout -t 2 cat /proc/$pid/stat 2>&1 | cut -c1-50)
+		usb_info "OK pid=$pid comm=$COMM stat=$STAT"
+		sleep 2
+	done
+	usb_info "SCAN_DONE"
+) &
 
 # Run command injection loop = can be exited via 'continue'
 inject_loop

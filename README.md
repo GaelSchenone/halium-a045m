@@ -120,11 +120,25 @@ to test whether something was stuck mid-`printk()` against a broken
 console, made no difference — the same hang recurred identically. This
 points at something more fundamental than any one storage or display
 driver: some kernel-internal lock or mechanism that jams up on essentially
-every boot of this kernel around the 30-40 second mark, independent of
-Halium or mounting at all — and which also happens to make the very tool
-needed to diagnose it (`dmesg`) unusable past that point. See PORTING.md
-for the full investigation and the plan to pin the root cause down
-further.
+every boot of this kernel, independent of Halium or mounting at all — and
+which also happens to make the very tools needed to diagnose it (`dmesg`,
+reading `pstore` live) unusable past that point.
+
+Replacing "wait then read" with a live poll loop (checking for D-state
+processes every few seconds from script start, instead of guessing a
+delay) showed the hang isn't actually tied to a ~30-40 second mark at all
+— that number only reflected how long the kernel's own hung-task detector
+takes to *report* something that was already broken. The poll's very first
+check, mere seconds into the script, already hung. Disabling this
+project's own reads of `/sys/class/mmc_host` (the original suspect from
+the very first sessions investigating this bug) made no difference either
+— ruling out that this project's own diagnostics are what trigger it.
+Bisecting process-by-process (announcing which PID is about to be read,
+over `iSerial`, before each read) narrowed it to the very first kernel
+thread after `rcu_preempt` (PID 10, itself healthy and idle) — a live test
+to identify that specific thread by name was in progress when the session
+paused. See PORTING.md for the full investigation and the exact next
+step.
 
 See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
 detailed log of every issue found and fixed so far.
