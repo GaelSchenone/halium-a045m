@@ -127,6 +127,17 @@ usb_info() {
     write $G_USB_ISERIAL "$1"
 }
 
+# Checkpoint probe (see PORTING.md, 2026-09-30): the isolated, very-early
+# PID 2 read succeeds, but a later full PID-by-PID scan (much further into
+# this script) hangs on its very first read — so something BETWEEN those
+# two points wedges all subsequent /proc reads, not any specific PID.
+# Called at several points to bisect which section of this script does it.
+probe_pid2() {
+    UP=$(timeout -t 2 cat /proc/uptime 2>&1 | cut -d' ' -f1)
+    R=$(timeout -t 2 cat /proc/2/comm 2>&1 | tr -d '\n' | cut -c1-20)
+    usb_info "CKPT[$1] up=${UP:-TIMEOUT} pid2=${R:-TIMEOUT}"
+}
+
 inject_loop() {
 	INJ_DIR=/init-ctl
 	INJ_STDIN=$INJ_DIR/stdin
@@ -154,6 +165,15 @@ inject_loop() {
 dd if=/dev/zero of=$DIAG_FILE bs=1M count=8 2>/dev/null
 
 usb_setup "halium-initrd telnet 192.168.2.15"
+
+# --- Dedicated, isolated PID 2 probe (see PORTING.md, 2026-09-24/30) ---
+# The bisect-by-PID scan (further down) consistently hung right after PID
+# 1 (init) in two separate boots, with PIDs sorted numerically both times
+# — meaning PID 2 (almost universally kthreadd, the kernel thread
+# daemon) is the one it never got past. This runs that specific check as
+# early and in isolation as possible, before any network/diag setup, to
+# rule out any ordering/timing effect from other work in this script.
+probe_pid2 "boot_start"
 
 USB_IFACE=notfound
 /sbin/ifconfig rndis0 $LOCAL_IP && USB_IFACE=rndis0
@@ -187,6 +207,7 @@ ps -ef
 netstat -lnp
 cat /proc/mounts
 sync
+probe_pid2 "after_udhcpd"
 
 # /dev/ptmx is missing on this device even though /dev/pts/ptmx exists;
 # without it, telnetd (and anything else needing a pty) cannot allocate
@@ -217,6 +238,7 @@ echo "http debug channel is alive" >$WWW_DIR/tiny.txt
 	ps -ef
 } >$WWW_DIR/diag.txt 2>&1
 sync
+probe_pid2 "after_diag_dump"
 # DISABLED for this test (see PORTING.md, 2026-09-24): /sys/class/mmc_host
 # and /sys/bus/mmc/drivers are the original suspects for the D-state hang,
 # going all the way back to the earliest sessions investigating this bug.
@@ -233,6 +255,7 @@ sync
 #   sync ) &
 timeout -t 15 dmesg >$WWW_DIR/dmesg.txt 2>&1
 sync
+probe_pid2 "after_dmesg"
 
 # --- Also copy diag.txt + dmesg.txt into the mass_storage backing file,
 # as a plain-text dump the host can read with dd/strings straight off the
@@ -297,6 +320,7 @@ usb_info "HUNG_TASKS: ${HUNG:-NONE}"
 # hangs). Grep that, no live read of anything.
 RCU=$(grep -iE "rcu_sched|rcu_preempt|RCU stall|self-detected stall" $WWW_DIR/dmesg.txt 2>/dev/null | tr '\n' '|' | cut -c1-100)
 usb_info "RCU_STALL: ${RCU:-NONE}"
+probe_pid2 "after_rcu_grep"
 
 # pstore mounts and lists instantly (proven safe — this part never hung):
 # ramoops.console_size registers its own kernel console sink, independent
@@ -312,6 +336,7 @@ mkdir -p /sys/fs/pstore
 MOUNT_OUT=$(mount -t pstore pstore /sys/fs/pstore 2>&1)
 PSTORE_LS=$(ls /sys/fs/pstore 2>&1 | tr '\n' ',' | cut -c1-80)
 usb_info "PSTORE_LS: ${PSTORE_LS:-EMPTY} mnt=${MOUNT_OUT:-ok}"
+probe_pid2 "after_pstore_mount"
 
 # --- Bisect-by-PID experiment (see PORTING.md, 2026-09-24) ---
 # The whole-/proc/*/stat-in-one-go poll loop (previous attempt) hung on
@@ -322,7 +347,10 @@ usb_info "PSTORE_LS: ${PSTORE_LS:-EMPTY} mnt=${MOUNT_OUT:-ok}"
 # read, so if that read hangs forever, the LAST message the host ever
 # sees names exactly which PID (and its comm) it got stuck on.
 (
-	PIDS=$(timeout -t 3 sh -c "ls /proc | grep -E '^[0-9]+\$'" 2>&1)
+	# `ls /proc` order isn't guaranteed (varies boot to boot — confirmed:
+	# one run hung right after PID 1, another got as far as PID 10 first).
+	# Sort numerically for a deterministic, reproducible sequence.
+	PIDS=$(timeout -t 3 sh -c "ls /proc | grep -E '^[0-9]+\$' | sort -n" 2>&1)
 	usb_info "PIDS: $(echo "$PIDS" | tr '\n' ',' | cut -c1-90)"
 	for pid in $PIDS; do
 		usb_info "TRY pid=$pid"

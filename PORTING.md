@@ -1004,18 +1004,81 @@ pausada acá — el celular quedó en el boot de debug (colgado en esta
 prueba), pendiente de recuperar con el reset físico en la próxima
 sesión.**
 
-**Para la próxima sesión (actualizado):**
-1. Recuperar el celular (reset físico → Download Mode → flashear
-   `firmware/boot_rooted2.img` + `firmware/super_stock.img` juntos).
-2. Reflashear `halium-boot-artifacts/halium-boot-httpd.img` (ya construido
-   con la versión de cadencia más lenta del bisect-por-PID) +
-   `firmware/super_halium_raw.img`, y pollear `iSerial` bien seguido
-   (cada ~1s) desde que el ping a 192.168.2.15 responde, para no perder
-   ningún mensaje `TRY pid=N` / `OK pid=N comm=... stat=...`.
-3. El PID que nunca llega a completar su lectura de `stat` (justo después
-   de `rcu_preempt`, PID 10) es el candidato número uno a ser la tarea
-   realmente trabada. Una vez identificado por `comm`, buscar ese driver/
-   subsistema específico en el código del kernel.
+**Sesión siguiente (2026-09-29/30): se retoma, se corrige el orden no
+determinístico de `ls /proc`, y aparece la conclusión más fuerte de toda
+la investigación.**
+
+Con los PIDs ordenados numéricamente (`sort -n`, ya que `ls /proc` no
+garantiza ningún orden y varía de boot a boot — confirmado: un intento se
+colgó justo después del PID 1, otro llegó hasta el PID 10 antes de
+colgarse), el bisect-por-PID se volvió reproducible: **siempre se cuelga
+justo después de leer el PID 1 (`init`)**, es decir, en el PID 2 — que en
+Linux es casi universalmente `kthreadd`, el demonio que crea todos los
+hilos de kernel. Para descartar cualquier efecto de orden/timing, se
+agregó una prueba dedicada y aislada, *lo más temprano posible en el
+script* (antes de configurar red, antes de cualquier otro diagnóstico):
+leer `/proc/2/comm` y `/proc/2/stat` en soledad. **Esa prueba temprana
+funcionó bien** — kthreadd es legible al principio del boot. Esto
+descartó que PID 2 esté roto *desde siempre*; algo lo rompe **entre
+medio**.
+
+Se instrumentó el script con checkpoints (`probe_pid2`, una función que
+lee `/proc/uptime` + `/proc/2/comm` y reporta por `iSerial`) en varios
+puntos intermedios: después de iniciar `udhcpd`, después del dump de
+diagnóstico estático, después de la captura temprana de `dmesg`, después
+del grep de RCU stall, y después de montar `pstore`. Resultado, en dos
+corridas separadas: **el punto exacto donde se cuelga varía de boot a
+boot** — una vez fue justo después del grep de RCU, otra vez después de
+montar `pstore` — pero SIEMPRE dentro de esa misma ventana de tiempo. Esto
+descarta definitivamente que sea una acción específica (ni `dmesg`, ni
+`pstore`, ni el grep de RCU, ni un PID en particular) la que dispara el
+problema: es el **tiempo transcurrido** desde el arranque, con algo de
+variación entre boots, coherente con los ~20-40s ya vistos (y con
+`CONFIG_RCU_CPU_STALL_TIMEOUT=21` / hung-task=30s).
+
+**El dato más contundente:** en la corrida donde se colgó después de
+`pstore`, se hizo un polling ultra agresivo (60 lecturas de `iSerial` casi
+sin pausa) esperando ver aunque sea el mensaje `CKPT[after_pstore_mount]`
+— y **nunca apareció, ni siquiera parcialmente**. Ese checkpoint intenta
+leer `/proc/uptime` ANTES que nada — la lectura más trivial que existe en
+todo el kernel, sin locks de ningún driver ni subsistema, solo aritmética
+sobre el reloj del kernel. Que ni siquiera esa lectura se complete es una
+señal fortísima de que el problema **no es de ningún driver ni mecanismo
+de logging en particular** — es mucho más básico: **el proceso mismo deja
+de ser planificado por el scheduler**, o el CPU/núcleo donde corre queda
+trabado a nivel de kernel (interrupciones deshabilitadas para siempre,
+tormenta de interrupciones, o un bug de cpuidle/hotplug que nunca
+despierta el núcleo). Esto explica limpiamente TODOS los síntomas vistos
+en esta investigación (sysfs de MMC, `dmesg`, `pstore`, y ahora hasta
+`/proc/uptime`) con una sola causa raíz, en vez de necesitar un bug
+distinto para cada mecanismo.
+
+**Conclusión: seguir iterando en vivo con más lecturas ya no va a aportar
+más información** — cualquier introspección que se intente hacer DESPUÉS
+de ese punto es, por definición, una víctima más del mismo cuelgue. El
+próximo paso real requiere revisar código del kernel, no el dispositivo:
+
+**Para la próxima sesión:**
+1. Buscar en `kernel/` qué corre específicamente en la ventana de ~20-40s
+   post-boot en este SoC/kernel: temporizadores de `cpuidle`/`cpufreq`,
+   la primera muestra del gobernador térmico, transiciones de power
+   management de MediaTek (`mtk_idle`, `spm`, `mcdi` — nombres típicos en
+   este vendor), o el primer intento de reintento de `deferred probe`.
+2. Revisar si hay reportes de tormenta de interrupciones o de algún
+   periférico (posiblemente relacionado a MMC/eMMC, dado el historial de
+   sospecha, pero ya no como única hipótesis) que dispare un handler de
+   IRQ que nunca retorna o que deshabilita interrupciones sin
+   rehabilitarlas.
+3. Si existe acceso a un kernel de referencia de Samsung/MediaTek para un
+   dispositivo similar (otro modelo con el mismo SoC MT6765) que SÍ
+   arranque Android normalmente sin este problema, comparar configs y
+   parches — el bug puede estar en un parche vendor específico de esta
+   variante, no en el MT6765 en general.
+4. Como último recurso si el análisis estático no alcanza: conseguir
+   acceso a hardware de debug real (JTAG/SWD si el board lo expone) para
+   un volcado de estado de CPU en el momento exacto del cuelgue — esto ya
+   excede lo que se puede hacer solo con software desde el propio
+   dispositivo.
 
 **Para la próxima sesión:**
 1. Revisar el código fuente del kernel (`kernel/drivers/mmc/` y

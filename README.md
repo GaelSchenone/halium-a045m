@@ -126,19 +126,37 @@ reading `pstore` live) unusable past that point.
 
 Replacing "wait then read" with a live poll loop (checking for D-state
 processes every few seconds from script start, instead of guessing a
-delay) showed the hang isn't actually tied to a ~30-40 second mark at all
-— that number only reflected how long the kernel's own hung-task detector
-takes to *report* something that was already broken. The poll's very first
-check, mere seconds into the script, already hung. Disabling this
-project's own reads of `/sys/class/mmc_host` (the original suspect from
-the very first sessions investigating this bug) made no difference either
-— ruling out that this project's own diagnostics are what trigger it.
-Bisecting process-by-process (announcing which PID is about to be read,
-over `iSerial`, before each read) narrowed it to the very first kernel
-thread after `rcu_preempt` (PID 10, itself healthy and idle) — a live test
-to identify that specific thread by name was in progress when the session
-paused. See PORTING.md for the full investigation and the exact next
-step.
+delay) still hangs, and disabling this project's own reads of
+`/sys/class/mmc_host` (the original suspect from the very first sessions
+investigating this bug) made no difference — ruling out that this
+project's own diagnostics trigger it. Bisecting process-by-process, with
+PIDs sorted deterministically (`ls /proc`'s order isn't guaranteed and
+varies boot to boot), consistently narrowed the failure to right after PID
+1 (`init`) — meaning PID 2, almost universally `kthreadd` on Linux. But an
+isolated, very-early check of PID 2 alone succeeds fine, ruling out that
+it's broken from boot; something breaks *in between*. Instrumenting
+several checkpoints through the middle of the script showed the exact
+point varies from boot to boot (sometimes right after a log grep,
+sometimes right after mounting `pstore`) — ruling out any *specific*
+action as the trigger and pointing at elapsed time instead, with some
+jitter, in the same ~20-40 second window seen throughout.
+
+The most telling result: on one run, a rapid burst of 60 near back-to-back
+checks never showed even the next checkpoint's very first step — a read
+of `/proc/uptime`, arguably the simplest possible read in the entire
+kernel, tied to no driver or subsystem at all. That not even this
+completes points away from any specific driver, lock, or logging
+mechanism, and toward something far more basic: the process itself
+simply stops being scheduled, consistent with a CPU core wedging at the
+kernel level (interrupts disabled forever, an interrupt storm, or a
+cpuidle/hotplug bug that never wakes a core back up) roughly 20-40 seconds
+into essentially every boot of this kernel — independent of Halium,
+mounting, or anything this project's own scripts do. Further live testing
+on the device is unlikely to reveal more, since any diagnostic attempted
+past that point is itself a casualty of the same freeze; the next step is
+static kernel source review (cpuidle/cpufreq/thermal/interrupt-handling
+code active in that time window) rather than more on-device experiments.
+See PORTING.md for the full investigation and the detailed next steps.
 
 See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
 detailed log of every issue found and fixed so far.
