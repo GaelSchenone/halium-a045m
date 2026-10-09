@@ -1056,25 +1056,59 @@ distinto para cada mecanismo.
 **Conclusión: seguir iterando en vivo con más lecturas ya no va a aportar
 más información** — cualquier introspección que se intente hacer DESPUÉS
 de ese punto es, por definición, una víctima más del mismo cuelgue. El
-próximo paso real requiere revisar código del kernel, no el dispositivo:
+próximo paso real requiere revisar código del kernel, no el dispositivo.
+
+**Sesión siguiente (2026-10-09): revisión estática del kernel y primer
+candidato probado — descartado.** Una revisión del código fuente (buscando
+qué corre específicamente en una ventana de ~20-40s post-boot, qué puede
+deshabilitar interrupciones o tomar un lock sin soltarlo nunca, y qué es
+específico de este vendor tree) encontró un candidato muy plausible: el
+subsistema **MCDI (deep-idle) de MediaTek**
+(`kernel/drivers/misc/mediatek/base/power/mcdi/mcdi_v1/mtk_mcdi_main.c`,
+confirmado activo vía `CONFIG_ARM_MTK_CPUIDLE=y` + `CONFIG_MACH_MT6765=y`
+seleccionando `mcdi_v1/`). `mcdi_enter()` decide, vía un gobernador, si un
+CPU entra en `MCDI_STATE_CPU_OFF`/`MCDI_STATE_CLUSTER_OFF` — estados donde
+el núcleo le delega a un **coprocesador separado** (SSPM/MCUPM) el
+apagado/reencendido real. Si ese handshake está roto en este dispositivo,
+un núcleo que entra ahí no vuelve nunca — encajaría con el freeze parcial
+(otros núcleos atendiendo USB/red siguen vivos) y con el timing variable
+(depende de cuándo el coprocesador avisa que está listo, no de un timer
+fijo).
+
+Primer intento, deshabilitar el subsistema entero
+(`CONFIG_ARM_MTK_CPUIDLE` → no, `CONFIG_CPU_IDLE_NO_MTK=y`,
+`CONFIG_ARM_CPUIDLE=y` como fallback genérico): **demasiado invasivo** —
+el dispositivo ni siquiera llegó a enumerar como gadget USB en 60+
+segundos (nunca antes había tardado más de ~13s). Deshabilitar el driver
+completo rompe algo más básico que solo el idle — probablemente
+`mcdi_init()`/el propio handshake con el coprocesador hace setup de
+hardware que otras partes del arranque (clocks, dominios de energía)
+también necesitan. Revertido.
+
+Segundo intento, un parche quirúrgico en `mcdi_enter()` (justo después de
+`mcdi_governor_select()`): si el estado elegido es `CPU_OFF` o
+`CLUSTER_OFF`, forzarlo a `MCDI_STATE_WFI` en su lugar — sin tocar nada
+del resto del init/gobernador/handshake. Esta vez el dispositivo arrancó
+normal (interfaz de red arriba en 11s, como siempre). **Pero el mismo
+cuelgue ocurrió exactamente en el mismo punto** (confirmado con 40
+lecturas de `iSerial` cada 0.5s, sin cambio). **Esto descarta a MCDI/
+deep-idle como la causa** — ni siquiera evitando por completo que un
+núcleo entre en esos estados de apagado se evita el freeze.
 
 **Para la próxima sesión:**
-1. Buscar en `kernel/` qué corre específicamente en la ventana de ~20-40s
-   post-boot en este SoC/kernel: temporizadores de `cpuidle`/`cpufreq`,
-   la primera muestra del gobernador térmico, transiciones de power
-   management de MediaTek (`mtk_idle`, `spm`, `mcdi` — nombres típicos en
-   este vendor), o el primer intento de reintento de `deferred probe`.
-2. Revisar si hay reportes de tormenta de interrupciones o de algún
-   periférico (posiblemente relacionado a MMC/eMMC, dado el historial de
-   sospecha, pero ya no como única hipótesis) que dispare un handler de
-   IRQ que nunca retorna o que deshabilita interrupciones sin
+1. MCDI descartado. Candidatos restantes para seguir revisando en
+   `kernel/`: el primer poll del gobernador térmico, el mecanismo de
+   reintento de `deferred probe` (`drivers/base/dd.c`), `cpufreq`
+   (transición de gobernador/tabla de frecuencias), o una tormenta de
+   interrupciones de algún periférico (no necesariamente MMC/eMMC —
+   ya no es el sospechoso principal) que deshabilite interrupciones sin
    rehabilitarlas.
-3. Si existe acceso a un kernel de referencia de Samsung/MediaTek para un
+2. Si existe acceso a un kernel de referencia de Samsung/MediaTek para un
    dispositivo similar (otro modelo con el mismo SoC MT6765) que SÍ
    arranque Android normalmente sin este problema, comparar configs y
    parches — el bug puede estar en un parche vendor específico de esta
    variante, no en el MT6765 en general.
-4. Como último recurso si el análisis estático no alcanza: conseguir
+3. Como último recurso si el análisis estático no alcanza: conseguir
    acceso a hardware de debug real (JTAG/SWD si el board lo expone) para
    un volcado de estado de CPU en el momento exacto del cuelgue — esto ya
    excede lo que se puede hacer solo con software desde el propio

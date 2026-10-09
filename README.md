@@ -151,12 +151,22 @@ simply stops being scheduled, consistent with a CPU core wedging at the
 kernel level (interrupts disabled forever, an interrupt storm, or a
 cpuidle/hotplug bug that never wakes a core back up) roughly 20-40 seconds
 into essentially every boot of this kernel — independent of Halium,
-mounting, or anything this project's own scripts do. Further live testing
-on the device is unlikely to reveal more, since any diagnostic attempted
-past that point is itself a casualty of the same freeze; the next step is
-static kernel source review (cpuidle/cpufreq/thermal/interrupt-handling
-code active in that time window) rather than more on-device experiments.
-See PORTING.md for the full investigation and the detailed next steps.
+mounting, or anything this project's own scripts do.
+
+A static kernel source review turned up a strong first candidate:
+MediaTek's MCDI deep-idle subsystem, where a CPU core hands off to a
+separate co-processor (SSPM/MCUPM) to actually power itself back on — a
+broken handshake there would explain a core that goes idle and never
+returns, and the partial (not total) freeze and variable timing observed.
+Disabling it outright was too invasive and broke USB gadget enumeration
+entirely (something more fundamental than idle depends on it); a
+narrower, surgical patch that only forces the deepest power states down
+to plain WFI booted fine but hit the exact same hang at the exact same
+point — ruling MCDI out as the cause. Remaining candidates for the next
+round of static review: the thermal governor's first poll, the deferred
+probe retry mechanism, cpufreq's first governor transition, or an
+interrupt storm from some other peripheral. See PORTING.md for the full
+investigation and the detailed next steps.
 
 See [PORTING.md](PORTING.md) for the full roadmap, build instructions, and a
 detailed log of every issue found and fixed so far.
