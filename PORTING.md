@@ -70,6 +70,29 @@ y binutils `toolchain/toolchains-gcc-10.3.0`). El `Makefile` del kernel usa
 `aarch64-linux-gnu-gcc` del sistema en vez de este toolchain rompe el build
 con errores de sintaxis rarísimos. **Siempre usar el toolchain vendorizado.**
 
+**Dependencias del sistema host** (necesarias para compilar y flashear;
+confirmado que una reinstalación limpia del SO se las lleva todas — volver
+a instalar con `apt` si falta alguna):
+- `bison` y `flex` — sin esto, `make a04_defconfig` falla con
+  `scripts/kconfig/zconf.tab.c: Error 127`.
+- `fakeroot` — necesario para repacker el ramdisk de debug con ownership
+  root sin usar `sudo` real (ver bug de cpio más abajo).
+- `heimdall-flash` + `heimdall-flash-frontend` (vía `apt`, da la misma
+  v2.1.0 que se usó toda la investigación) — para flashear `boot`/`super`
+  al dispositivo en Download Mode.
+- `adb` (`android-tools-adb`, o viene con el platform-tools del Android
+  SDK) — para pedirle al propio teléfono que entre a Download Mode
+  (`adb reboot download`) sin depender del combo físico de teclas, y para
+  confirmar que arrancó bien a Android normal después de recuperarlo.
+  Después de una reinstalación del SO hay que volver a autorizar la
+  depuración USB desde la pantalla del teléfono (se perdieron las claves
+  RSA viejas) — si el cartel no aparece solo, probar `adb kill-server` +
+  reconectar el cable.
+- El wrapper de clang (`tools/clang-wrapper`, ver más abajo, **gitignored**
+  — si se reinstala el SO pero se conserva el home, el archivo sigue ahí;
+  si se pierde, hay que recrearlo) solo hace falta en una máquina con CUDA
+  instalado.
+
 ### Fase 1 — Kernel propio, boot sanity check ✅ COMPLETA
 - [x] Compilar `kernel/` tal cual, sin modificar nada — **logrado**, con el
       harness oficial (`build/build.sh`). Generó `Image`, `Image.gz` y el DTB
